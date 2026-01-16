@@ -72,6 +72,7 @@ type AppStateV1 = {
 const STORAGE_KEY = "kyd_state_v2";
 const LEGACY_STORAGE_KEY = "kyd_state_v1";
 
+
 // ---------------------------
 // Storage adapter (localStorage)
 // ---------------------------
@@ -80,19 +81,20 @@ function defaultState(): AppState {
 }
 
 function migrateStateV1(data: AppStateV1): AppState {
-  const ideas: Idea[] = (data.ideas ?? []).map((idea) => {
-    const migratedProofs =
-      idea.proofValue && idea.proofValue.trim()
-        ? [
-            {
-              id: uid(),
-              type: idea.proofType === "link" ? "url" : "note",
-              value: idea.proofValue,
-            },
-          ]
-        : [];
+  const ideas: Idea[] = (data.ideas ?? []).map((idea): Idea => {
+    const proofValue = idea.proofValue?.trim();
 
-    const killReasonDetail = idea.killedReason?.trim() || "";
+    const migratedProofs: Idea["proofs"] = proofValue
+      ? [
+          {
+            id: uid(),
+            type: idea.proofType === "link" ? "url" : "note",
+            value: proofValue,
+          },
+        ]
+      : [];
+
+    const killReasonDetail = idea.killedReason?.trim() ?? "";
 
     return {
       id: idea.id,
@@ -101,6 +103,8 @@ function migrateStateV1(data: AppStateV1): AppState {
       deadlineAt: idea.deadlineAt,
       proofType: idea.proofType,
       status: idea.status,
+
+      // v2 additions
       problemStatement: "",
       audience: "",
       proofDefinition: "",
@@ -108,6 +112,8 @@ function migrateStateV1(data: AppStateV1): AppState {
       notes: "",
       betCommitted: false,
       proofs: migratedProofs,
+
+      // resolution mapping
       killReasonCode: idea.status === "killed" ? "OTHER" : undefined,
       killReasonDetail: idea.status === "killed" ? killReasonDetail : undefined,
       resolvedAt: idea.resolvedAt,
@@ -121,6 +127,7 @@ function migrateStateV1(data: AppStateV1): AppState {
     lastActivationWeek: "",
   };
 }
+
 
 function loadState(): AppState {
   if (typeof window === "undefined") {
@@ -237,6 +244,9 @@ export default function Page() {
 
   const [hydrated, setHydrated] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
+  const decisionRef = React.useRef<HTMLElement | null>(null);
+const [decisionFlash, setDecisionFlash] = useState(false);
+
 
   // Edit panel state
   const [editing, setEditing] = useState(false);
@@ -285,6 +295,19 @@ export default function Page() {
     setEditActivationError("");
   }, [editBetCommitted, editProofDefinition, editStatus]);
 
+// Auto-scroll + subtle flash on selection
+useEffect(() => {
+  if (!selectedIdea) return;
+
+  decisionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  setDecisionFlash(true);
+  const t = setTimeout(() => setDecisionFlash(false), 900);
+  return () => clearTimeout(t);
+}, [selectedIdea?.id]);
+
+
+
   // Load on mount
   useEffect(() => {
     const loaded = loadState();
@@ -315,12 +338,13 @@ export default function Page() {
         if (idea.status === "active" && now >= idea.deadlineAt) {
           changed = true;
           return {
-            ...idea,
-            status: "killed",
-            resolvedAt: now,
-            killReasonCode: "TIME_EXPIRED",
-            killReasonDetail: "",
-          };
+  ...idea,
+  status: "killed" as const,
+  resolvedAt: now,
+  killReasonCode: "TIME_EXPIRED" as const,
+  killReasonDetail: "",
+};
+
         }
         return idea;
       });
@@ -850,10 +874,12 @@ export default function Page() {
                     key={idea.id}
                     onClick={() => setSelectedId(idea.id)}
                     className={cx(
-                      "w-full rounded-2xl border p-4 text-left transition",
-                      "bg-zinc-950/30 hover:bg-zinc-950/40",
-                      expired ? "border-rose-500/30 shadow-[0_0_40px_rgba(244,63,94,0.06)]" : "border-zinc-800/70"
-                    )}
+  "w-full rounded-2xl border p-4 text-left transition",
+  "bg-zinc-950/30 hover:bg-zinc-950/40",
+  selectedId === idea.id && "border-cyan-400/40 bg-zinc-950/50",
+  expired ? "border-rose-500/30 shadow-[0_0_40px_rgba(244,63,94,0.06)]" : "border-zinc-800/70"
+)}
+
                   >
                     <div className="flex flex-col gap-2">
                       <div className="flex items-start justify-between gap-3">
@@ -885,6 +911,16 @@ export default function Page() {
                       <div className="text-xs text-zinc-500">
                         Proof: <span className="text-zinc-300">{idea.proofType}</span>
                       </div>
+
+                      {idea.proofDefinition.trim() && (
+  <div className="text-xs text-zinc-500">
+    Success:{" "}
+    <span className="text-zinc-300 line-clamp-1">
+      {idea.proofDefinition}
+    </span>
+  </div>
+)}
+
 
                       {expired && (
                         <div className="text-xs text-rose-200/80">
@@ -940,6 +976,15 @@ export default function Page() {
                             Captured {fmtDate(idea.createdAt)} · Default deadline {fmtDate(idea.deadlineAt)} · Proof{" "}
                             <span className="text-zinc-300">{idea.proofType}</span>
                           </div>
+                          {idea.proofDefinition.trim() && (
+  <div className="mt-2 text-xs text-zinc-500">
+    Success:{" "}
+    <span className="text-zinc-300 line-clamp-1">
+      {idea.proofDefinition}
+    </span>
+  </div>
+)}
+
                         </div>
 
                         <div className="flex flex-wrap gap-2">
@@ -983,8 +1028,16 @@ export default function Page() {
         </section>
 
         {/* Detail panel */}
-        {selectedIdea && (
-          <section className="relative mt-8 rounded-2xl border border-zinc-800/70 bg-zinc-900/20 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur">
+       {selectedIdea && (
+  <section
+  ref={decisionRef}
+  className={cx(
+    "relative mt-8 rounded-2xl border border-zinc-800/70 bg-zinc-900/20 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur transition",
+    decisionFlash && "ring-1 ring-cyan-400/40 shadow-[0_0_60px_rgba(34,211,238,0.08)]"
+  )}
+>
+
+
             <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-lime-300/20 to-transparent" />
 
             <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
