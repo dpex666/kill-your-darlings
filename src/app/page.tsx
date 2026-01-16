@@ -393,6 +393,8 @@ export default function Page() {
   const [boxOpen, setBoxOpen] = useState(false);
   const [boxDrop, setBoxDrop] = useState(false);
   const [openChooser, setOpenChooser] = useState(false);
+  const [boxCinematic, setBoxCinematic] = useState(false);
+  const [boxStage, setBoxStage] = useState<"idle" | "centering" | "shaking" | "lidOff">("idle");
 
   // Box reveal + decision state
   const [revealedItemId, setRevealedItemId] = useState<string | null>(null);
@@ -676,6 +678,13 @@ export default function Page() {
     globalThis.setTimeout(() => setBoxDrop(false), 700);
   }
 
+  function animateBoxOpenCinematic() {
+    setBoxCinematic(true);
+    setBoxStage("centering");
+    globalThis.setTimeout(() => setBoxStage("shaking"), 450);
+    globalThis.setTimeout(() => setBoxStage("lidOff"), 900);
+  }
+
   function captureToBox() {
     const content = boxContent.trim();
     if (!content) return;
@@ -725,7 +734,7 @@ export default function Page() {
     setRevealedDomain(targetDomain);
     setOpenChooser(false);
 
-    animateBoxOpen();
+    animateBoxOpenCinematic();
     animateBoxDrop();
 
     setState((prev) => ({
@@ -828,6 +837,8 @@ export default function Page() {
     setSelectedId(newIdea.id);
     setRevealedItemId(null);
     setRevealedDomain(null);
+    setBoxCinematic(false);
+    setBoxStage("idle");
   }
 
   function updateIdea() {
@@ -926,6 +937,8 @@ export default function Page() {
     setEditing(false);
     setRevealedItemId(null);
     setRevealedDomain(null);
+    setBoxCinematic(false);
+    setBoxStage("idle");
   }
 
   function handleReturn() {
@@ -953,6 +966,8 @@ export default function Page() {
     setRevealedDomain(null);
     setReturnReason("");
     setReturnError("");
+    setBoxCinematic(false);
+    setBoxStage("idle");
   }
 
   function handleKill() {
@@ -971,6 +986,8 @@ export default function Page() {
     setRevealedDomain(null);
     setBoxKillReason("");
     setBoxKillDetail("");
+    setBoxCinematic(false);
+    setBoxStage("idle");
   }
 
   function handleEarlyUnlock() {
@@ -1196,112 +1213,161 @@ export default function Page() {
                 </div>
               )}
 
-              <div className="relative mt-6 flex items-center justify-center">
-  <div className="relative h-52 w-56">
-    {/* soft floor shadow */}
-    <div className="absolute inset-x-10 bottom-6 h-8 rounded-full bg-black/40 blur-xl" />
+              {boxCinematic && (
+                <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm">
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08),transparent_55%)]" />
+                </div>
+              )}
 
-    {/* gift base */}
-    <div
-      className={cx(
-        "absolute left-1/2 top-16 h-28 w-48 -translate-x-1/2 rounded-3xl",
-        "border border-zinc-700/60 bg-zinc-950/60 backdrop-blur",
-        "shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_18px_60px_rgba(34,211,238,0.08)]",
-        "transition-transform duration-500",
-        boxOpen ? "translate-y-2" : "translate-y-0"
-      )}
-    >
-      {/* base sheen */}
-      <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_25%_25%,rgba(34,211,238,0.18),transparent_55%),radial-gradient(circle_at_80%_30%,rgba(232,121,249,0.18),transparent_60%),linear-gradient(to_bottom,rgba(255,255,255,0.06),transparent_35%)]" />
+              <div
+                className={cx(
+                  "relative mt-6 flex items-center justify-center transition-all duration-500",
+                  boxCinematic && "fixed inset-0 z-50 mt-0"
+                )}
+              >
+                <div
+                  className={cx(
+                    "relative h-52 w-56 transition-transform duration-500",
+                    boxCinematic && "scale-110"
+                  )}
+                >
+                  <div
+                    className={cx(
+                      "relative h-full w-full",
+                      boxStage === "shaking" && "animate-kyd-shake"
+                    )}
+                  >
+                    {/* soft floor shadow */}
+                    <div className="absolute inset-x-10 bottom-6 h-8 rounded-full bg-black/40 blur-xl" />
 
-      {/* ribbon vertical */}
-      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl bg-gradient-to-b from-fuchsia-200/55 via-cyan-200/55 to-fuchsia-200/45 opacity-80" />
-      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
+                    {/* gift base */}
+                    <div
+                      className={cx(
+                        "absolute left-1/2 top-16 h-28 w-48 -translate-x-1/2 rounded-3xl",
+                        "border border-zinc-700/60 bg-zinc-950/60 backdrop-blur",
+                        "shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_18px_60px_rgba(34,211,238,0.08)]",
+                        "transition-transform duration-500",
+                        boxCinematic
+                          ? "translate-y-0"
+                          : boxOpen
+                          ? "translate-y-2"
+                          : "translate-y-0"
+                      )}
+                    >
+                      {/* base sheen */}
+                      <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_25%_25%,rgba(34,211,238,0.18),transparent_55%),radial-gradient(circle_at_80%_30%,rgba(232,121,249,0.18),transparent_60%),linear-gradient(to_bottom,rgba(255,255,255,0.06),transparent_35%)]" />
 
-      {/* ribbon horizontal */}
-      <div className="absolute left-0 top-1/2 h-10 w-full -translate-y-1/2 rounded-2xl bg-gradient-to-r from-fuchsia-200/45 via-cyan-200/55 to-fuchsia-200/45 opacity-80" />
-      <div className="absolute left-0 top-1/2 h-10 w-full -translate-y-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
+                      {/* ribbon vertical */}
+                      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl bg-gradient-to-b from-fuchsia-200/55 via-cyan-200/55 to-fuchsia-200/45 opacity-80" />
+                      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
 
-      {/* little highlight edge */}
-      <div className="pointer-events-none absolute inset-x-6 top-2 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
-    </div>
+                      {/* ribbon horizontal */}
+                      <div className="absolute left-0 top-1/2 h-10 w-full -translate-y-1/2 rounded-2xl bg-gradient-to-r from-fuchsia-200/45 via-cyan-200/55 to-fuchsia-200/45 opacity-80" />
+                      <div className="absolute left-0 top-1/2 h-10 w-full -translate-y-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
 
-    {/* lid */}
-    <div
-      className={cx(
-        "absolute left-1/2 top-10 h-14 w-52 -translate-x-1/2 rounded-3xl",
-        "border border-zinc-700/70 bg-zinc-900/70 backdrop-blur",
-        "shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_12px_40px_rgba(232,121,249,0.08)]",
-        "transition-transform duration-500 origin-bottom",
-        boxOpen ? "-translate-y-6 rotate-[-14deg]" : "translate-y-0 rotate-0"
-      )}
-    >
-      {/* lid sheen */}
-      <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_25%_30%,rgba(34,211,238,0.14),transparent_60%),radial-gradient(circle_at_80%_35%,rgba(232,121,249,0.14),transparent_65%),linear-gradient(to_bottom,rgba(255,255,255,0.07),transparent_40%)]" />
+                      {/* little highlight edge */}
+                      <div className="pointer-events-none absolute inset-x-6 top-2 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+                    </div>
 
-      {/* ribbon on lid */}
-      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl bg-gradient-to-b from-fuchsia-200/55 via-cyan-200/55 to-fuchsia-200/45 opacity-85" />
-      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
-    </div>
+                    {/* lid */}
+                    <div
+                      className={cx(
+                        "absolute left-1/2 top-10 h-14 w-52 -translate-x-1/2 rounded-3xl",
+                        "border border-zinc-700/70 bg-zinc-900/70 backdrop-blur",
+                        "shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_12px_40px_rgba(232,121,249,0.08)]",
+                        "transition-transform origin-bottom",
+                        boxStage === "lidOff" ? "duration-700" : "duration-500",
+                        boxCinematic
+                          ? boxStage === "centering"
+                            ? "-translate-y-3 rotate-[-6deg]"
+                            : boxStage === "shaking"
+                            ? "-translate-y-5 rotate-[-10deg]"
+                            : boxStage === "lidOff"
+                            ? "translate-x-16 -translate-y-16 rotate-[18deg]"
+                            : "translate-y-0 rotate-0"
+                          : boxOpen
+                          ? "-translate-y-6 rotate-[-14deg]"
+                          : "translate-y-0 rotate-0"
+                      )}
+                    >
+                      {/* lid sheen */}
+                      <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_25%_30%,rgba(34,211,238,0.14),transparent_60%),radial-gradient(circle_at_80%_35%,rgba(232,121,249,0.14),transparent_65%),linear-gradient(to_bottom,rgba(255,255,255,0.07),transparent_40%)]" />
 
-    {/* bow */}
-    <div
-      className={cx(
-        "absolute left-1/2 top-7 -translate-x-1/2",
-        "transition-transform duration-500",
-        boxOpen ? "-translate-y-7 rotate-[-8deg]" : "translate-y-0 rotate-0"
-      )}
-    >
-      <div className="relative h-12 w-28">
-        {/* knot */}
-        <div className="absolute left-1/2 top-5 h-4 w-4 -translate-x-1/2 rounded-full bg-gradient-to-br from-fuchsia-200/70 to-cyan-200/70 shadow-[0_0_0_1px_rgba(255,255,255,0.18)]" />
+                      {/* ribbon on lid */}
+                      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl bg-gradient-to-b from-fuchsia-200/55 via-cyan-200/55 to-fuchsia-200/45 opacity-85" />
+                      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
+                    </div>
 
-        {/* left loop */}
-        <div
-          className={cx(
-            "absolute left-2 top-4 h-7 w-12 rounded-full",
-            "bg-gradient-to-br from-fuchsia-200/55 to-cyan-200/55",
-            "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]",
-            boxDrop ? "animate-bounce" : ""
-          )}
-          style={{ transform: "rotate(-18deg)" }}
-        />
-        {/* right loop */}
-        <div
-          className={cx(
-            "absolute right-2 top-4 h-7 w-12 rounded-full",
-            "bg-gradient-to-br from-cyan-200/55 to-fuchsia-200/55",
-            "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]",
-            boxDrop ? "animate-bounce" : ""
-          )}
-          style={{ transform: "rotate(18deg)" }}
-        />
+                    {/* bow */}
+                    <div
+                      className={cx(
+                        "absolute left-1/2 top-7 -translate-x-1/2",
+                        "transition-transform",
+                        boxStage === "lidOff" ? "duration-700" : "duration-500",
+                        boxCinematic
+                          ? boxStage === "centering"
+                            ? "-translate-y-4 rotate-[-4deg]"
+                            : boxStage === "shaking"
+                            ? "-translate-y-6 rotate-[-8deg]"
+                            : boxStage === "lidOff"
+                            ? "translate-x-14 -translate-y-16 rotate-[16deg]"
+                            : "translate-y-0 rotate-0"
+                          : boxOpen
+                          ? "-translate-y-7 rotate-[-8deg]"
+                          : "translate-y-0 rotate-0"
+                      )}
+                    >
+                      <div className="relative h-12 w-28">
+                        {/* knot */}
+                        <div className="absolute left-1/2 top-5 h-4 w-4 -translate-x-1/2 rounded-full bg-gradient-to-br from-fuchsia-200/70 to-cyan-200/70 shadow-[0_0_0_1px_rgba(255,255,255,0.18)]" />
 
-        {/* tails */}
-        <div
-          className="absolute left-10 top-9 h-8 w-3 rounded-full bg-gradient-to-b from-fuchsia-200/55 to-cyan-200/35"
-          style={{ transform: "rotate(18deg)" }}
-        />
-        <div
-          className="absolute right-10 top-9 h-8 w-3 rounded-full bg-gradient-to-b from-cyan-200/55 to-fuchsia-200/35"
-          style={{ transform: "rotate(-18deg)" }}
-        />
-      </div>
-    </div>
+                        {/* left loop */}
+                        <div
+                          className={cx(
+                            "absolute left-2 top-4 h-7 w-12 rounded-full",
+                            "bg-gradient-to-br from-fuchsia-200/55 to-cyan-200/55",
+                            "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]",
+                            boxDrop ? "animate-bounce" : ""
+                          )}
+                          style={{ transform: "rotate(-18deg)" }}
+                        />
+                        {/* right loop */}
+                        <div
+                          className={cx(
+                            "absolute right-2 top-4 h-7 w-12 rounded-full",
+                            "bg-gradient-to-br from-cyan-200/55 to-fuchsia-200/55",
+                            "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]",
+                            boxDrop ? "animate-bounce" : ""
+                          )}
+                          style={{ transform: "rotate(18deg)" }}
+                        />
 
-    {/* sparkle drop when capturing/opening */}
-    {boxDrop && (
-      <>
-        <div className="absolute left-1/2 top-2 h-2 w-2 -translate-x-1/2 rounded-full bg-cyan-200/80 blur-[0.5px] animate-bounce" />
-        <div className="absolute left-[46%] top-6 h-1.5 w-1.5 rounded-full bg-fuchsia-200/70 blur-[0.5px] animate-bounce" />
-        <div className="absolute left-[54%] top-7 h-1.5 w-1.5 rounded-full bg-lime-200/60 blur-[0.5px] animate-bounce" />
-      </>
-    )}
+                        {/* tails */}
+                        <div
+                          className="absolute left-10 top-9 h-8 w-3 rounded-full bg-gradient-to-b from-fuchsia-200/55 to-cyan-200/35"
+                          style={{ transform: "rotate(18deg)" }}
+                        />
+                        <div
+                          className="absolute right-10 top-9 h-8 w-3 rounded-full bg-gradient-to-b from-cyan-200/55 to-fuchsia-200/35"
+                          style={{ transform: "rotate(-18deg)" }}
+                        />
+                      </div>
+                    </div>
 
-    {/* outer glow */}
-    <div className="pointer-events-none absolute inset-6 rounded-[32px] border border-cyan-300/10 opacity-70 blur-xl" />
-  </div>
-</div>
+                    {/* sparkle drop when capturing/opening */}
+                    {boxDrop && (
+                      <>
+                        <div className="absolute left-1/2 top-2 h-2 w-2 -translate-x-1/2 rounded-full bg-cyan-200/80 blur-[0.5px] animate-bounce" />
+                        <div className="absolute left-[46%] top-6 h-1.5 w-1.5 rounded-full bg-fuchsia-200/70 blur-[0.5px] animate-bounce" />
+                        <div className="absolute left-[54%] top-7 h-1.5 w-1.5 rounded-full bg-lime-200/60 blur-[0.5px] animate-bounce" />
+                      </>
+                    )}
+
+                    {/* outer glow */}
+                    <div className="pointer-events-none absolute inset-6 rounded-[32px] border border-cyan-300/10 opacity-70 blur-xl" />
+                  </div>
+                </div>
+              </div>
 
 
               <div className="mt-3 text-center text-xs text-zinc-500">
@@ -1356,157 +1422,6 @@ export default function Page() {
             </div>
           </div>
 
-          {revealedItem && revealedDomain && (
-            <div className="mt-6 rounded-2xl border border-zinc-800/70 bg-zinc-950/30 p-4">
-              <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-                <div>
-                  <div className="text-sm font-semibold">The box revealed</div>
-                  <div className="mt-1 text-sm text-zinc-200 whitespace-pre-line">
-                    {revealedItem.content}
-                  </div>
-                  <div className="mt-2 text-xs text-zinc-500">
-                    Domain: <span className="text-zinc-300">{domainLabels[revealedDomain]}</span>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-400">
-                  Return count: {revealedItem.returnCount}
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-4 md:grid-cols-3">
-                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
-                  <div className="text-sm font-semibold">Promote</div>
-                  <div className="mt-1 text-xs text-zinc-500">
-                    Title + proof required. Pick your deadline and commit the bet.
-                  </div>
-
-                  <div className="mt-3 space-y-2">
-                    <input
-                      value={promoteTitle}
-                      onChange={(e) => setPromoteTitle(e.target.value)}
-                      placeholder="Title"
-                      className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-                      maxLength={120}
-                    />
-                    <input
-                      value={promoteProofDefinition}
-                      onChange={(e) => setPromoteProofDefinition(e.target.value)}
-                      placeholder="Proof definition (required)"
-                      className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-                    />
-                    <label className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-300">
-                      <input
-                        type="checkbox"
-                        checked={promoteBetCommitted}
-                        onChange={(e) => setPromoteBetCommitted(e.target.checked)}
-                        className="h-4 w-4 accent-zinc-100"
-                      />
-                      I’d bet $100 this ships on time
-                    </label>
-                    <div>
-                      <label className="text-[11px] text-zinc-500">Deadline (days)</label>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        value={promoteDays === 0 ? "" : String(promoteDays)}
-                        onChange={(e) => {
-                          const val = e.target.value.replace(/\D/g, "");
-                          if (val === "") {
-                            setPromoteDays(0);
-                            return;
-                          }
-                          setPromoteDays(clamp(Number(val), 1, 90));
-                        }}
-                        onBlur={() => {
-                          if (!promoteDays || promoteDays < 1) {
-                            setPromoteDays(defaultDaysByDomain[revealedDomain]);
-                          }
-                        }}
-                        className="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => revealedItem && promoteBoxItem(revealedItem)}
-                    className="mt-3 w-full rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-3 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95"
-                  >
-                    Promote to Active
-                  </button>
-
-                  {promoteError && (
-                    <div className="mt-2 text-xs text-rose-200/80">{promoteError}</div>
-                  )}
-
-                  {!canAddToActive && (
-                    <div className="mt-2 text-[11px] text-zinc-500">Active list full.</div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
-                  <div className="text-sm font-semibold">Return</div>
-                  <div className="mt-1 text-xs text-zinc-500">
-                    Toss it back with a micro-reason. It’ll cool down before resurfacing.
-                  </div>
-
-                  <input
-                    value={returnReason}
-                    onChange={(e) => setReturnReason(e.target.value.slice(0, 15))}
-                    placeholder="Reason (≤15 chars)"
-                    className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-                    maxLength={15}
-                  />
-                  <div className="mt-1 text-[11px] text-zinc-500">
-                    {returnReason.length}/15
-                  </div>
-
-                  <button
-                    onClick={handleReturn}
-                    className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/40"
-                  >
-                    Return to Box
-                  </button>
-
-                  {returnError && <div className="mt-2 text-xs text-rose-200/80">{returnError}</div>}
-                </div>
-
-                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
-                  <div className="text-sm font-semibold">Kill</div>
-                  <div className="mt-1 text-xs text-zinc-500">Cut it now. No graveyard for box items.</div>
-
-                  <select
-                    value={boxKillReason}
-                    onChange={(e) => setBoxKillReason(e.target.value as KillReasonCode)}
-                    className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
-                  >
-                    <option value="">Select a reason</option>
-                    {boxKillReasons.map((reason) => (
-                      <option key={reason.code} value={reason.code}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  <textarea
-                    value={boxKillDetail}
-                    onChange={(e) => setBoxKillDetail(e.target.value)}
-                    placeholder="Optional detail"
-                    className="mt-2 h-20 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-                    rows={3}
-                  />
-
-                  <button
-                    onClick={handleKill}
-                    disabled={!boxKillReason}
-                    className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/40 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Kill it
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </section>
 
         {/* Active */}
@@ -1869,6 +1784,158 @@ export default function Page() {
         </footer>
       </div>
 
+      {revealedItem && revealedDomain && (!boxCinematic || boxStage === "lidOff") && (
+        <Modal onClose={() => {}} showClose={false} className="max-w-5xl">
+          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="text-sm font-semibold">The box revealed</div>
+              <div className="mt-1 text-sm text-zinc-200 whitespace-pre-line">
+                {revealedItem.content}
+              </div>
+              <div className="mt-2 text-xs text-zinc-500">
+                Domain: <span className="text-zinc-300">{domainLabels[revealedDomain]}</span>
+              </div>
+            </div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-400">
+              Return count: {revealedItem.returnCount}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-sm font-semibold">Promote</div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Title + proof required. Pick your deadline and commit the bet.
+              </div>
+
+              <div className="mt-3 space-y-2">
+                <input
+                  value={promoteTitle}
+                  onChange={(e) => setPromoteTitle(e.target.value)}
+                  placeholder="Title"
+                  className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                  maxLength={120}
+                />
+                <input
+                  value={promoteProofDefinition}
+                  onChange={(e) => setPromoteProofDefinition(e.target.value)}
+                  placeholder="Proof definition (required)"
+                  className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                />
+                <label className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={promoteBetCommitted}
+                    onChange={(e) => setPromoteBetCommitted(e.target.checked)}
+                    className="h-4 w-4 accent-zinc-100"
+                  />
+                  I’d bet $100 this ships on time
+                </label>
+                <div>
+                  <label className="text-[11px] text-zinc-500">Deadline (days)</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={promoteDays === 0 ? "" : String(promoteDays)}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\D/g, "");
+                      if (val === "") {
+                        setPromoteDays(0);
+                        return;
+                      }
+                      setPromoteDays(clamp(Number(val), 1, 90));
+                    }}
+                    onBlur={() => {
+                      if (!promoteDays || promoteDays < 1) {
+                        setPromoteDays(defaultDaysByDomain[revealedDomain]);
+                      }
+                    }}
+                    className="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
+                  />
+                </div>
+              </div>
+
+              <button
+                onClick={() => revealedItem && promoteBoxItem(revealedItem)}
+                className="mt-3 w-full rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-3 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95"
+              >
+                Promote to Active
+              </button>
+
+              {promoteError && (
+                <div className="mt-2 text-xs text-rose-200/80">{promoteError}</div>
+              )}
+
+              {!canAddToActive && (
+                <div className="mt-2 text-[11px] text-zinc-500">Active list full.</div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-sm font-semibold">Return</div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Toss it back with a micro-reason. It’ll cool down before resurfacing.
+              </div>
+
+              <input
+                value={returnReason}
+                onChange={(e) => setReturnReason(e.target.value.slice(0, 15))}
+                placeholder="Reason (≤15 chars)"
+                className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                maxLength={15}
+              />
+              <div className="mt-1 text-[11px] text-zinc-500">
+                {returnReason.length}/15
+              </div>
+
+              <button
+                onClick={handleReturn}
+                className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/40"
+              >
+                Return to Box
+              </button>
+
+              {returnError && <div className="mt-2 text-xs text-rose-200/80">{returnError}</div>}
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-sm font-semibold">Kill</div>
+              <div className="mt-1 text-xs text-zinc-500">Cut it now. No graveyard for box items.</div>
+
+              <select
+                value={boxKillReason}
+                onChange={(e) => setBoxKillReason(e.target.value as KillReasonCode)}
+                className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
+              >
+                <option value="">Select a reason</option>
+                {boxKillReasons.map((reason) => (
+                  <option key={reason.code} value={reason.code}>
+                    {reason.label}
+                  </option>
+                ))}
+              </select>
+
+              <textarea
+                value={boxKillDetail}
+                onChange={(e) => setBoxKillDetail(e.target.value)}
+                placeholder="Optional detail"
+                className="mt-2 h-20 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                rows={3}
+              />
+
+              <button
+                onClick={handleKill}
+                disabled={!boxKillReason}
+                className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Kill it
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {earlyUnlockDomain && (
         <Modal onClose={() => setEarlyUnlockDomain(null)}>
           <div className="text-sm font-semibold">Early unlock {domainLabels[earlyUnlockDomain]}</div>
@@ -1999,6 +2066,20 @@ export default function Page() {
           )}
         </Modal>
       )}
+
+      <style>{`
+        @keyframes kyd-shake {
+          0% { transform: translateX(0); }
+          20% { transform: translateX(-6px) rotate(-1deg); }
+          40% { transform: translateX(6px) rotate(1deg); }
+          60% { transform: translateX(-4px) rotate(-0.5deg); }
+          80% { transform: translateX(4px) rotate(0.5deg); }
+          100% { transform: translateX(0); }
+        }
+        .animate-kyd-shake {
+          animation: kyd-shake 0.35s ease-in-out;
+        }
+      `}</style>
     </main>
   );
 }
@@ -2057,16 +2138,33 @@ function EmptyCard({ text }: { text: string }) {
   );
 }
 
-function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+function Modal({
+  children,
+  onClose,
+  showClose = true,
+  className,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  showClose?: boolean;
+  className?: string;
+}) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-      <div className="relative w-full max-w-md rounded-2xl border border-zinc-800/80 bg-zinc-950/90 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]">
-        <button
-          onClick={onClose}
-          className="absolute right-3 top-3 text-xs text-zinc-500 hover:text-zinc-200"
-        >
-          Close
-        </button>
+      <div
+        className={cx(
+          "relative w-full max-w-md rounded-2xl border border-zinc-800/80 bg-zinc-950/90 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]",
+          className
+        )}
+      >
+        {showClose && (
+          <button
+            onClick={onClose}
+            className="absolute right-3 top-3 text-xs text-zinc-500 hover:text-zinc-200"
+          >
+            Close
+          </button>
+        )}
         {children}
       </div>
     </div>
