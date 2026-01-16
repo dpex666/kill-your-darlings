@@ -6,6 +6,7 @@ import SupportBuild from "@/components/SupportBuild";
 import { SUPPORT_URL } from "@/lib/support";
 
 type ProofType = "link" | "text";
+
 type IdeaStatus = "backlog" | "active" | "shipped" | "killed";
 type KillReasonCode =
   | "TIME_EXPIRED"
@@ -16,6 +17,14 @@ type KillReasonCode =
   | "BLOCKED"
   | "OTHER";
 type ProofAttachmentType = "url" | "github" | "note";
+
+type Domain =
+  | "business"
+  | "career"
+  | "relationships"
+  | "dating"
+  | "lifestyle"
+  | "random";
 
 type Idea = {
   id: string;
@@ -42,13 +51,41 @@ type Idea = {
   resolvedAt?: number; // ms
 };
 
+type BoxItem = {
+  id: string;
+  content: string;
+  domain: Domain;
+  createdAt: number;
+  nextRevealAt: number;
+  returnCount: number;
+  lastReturnedReason?: string;
+  earlyUnlockDebt?: {
+    reason: string;
+    createdAt: number;
+    resolved?: boolean;
+  };
+  origin?: "captured" | "expired_active";
+  linkedIdeaId?: string;
+};
+
 type AppState = {
-  version: 2;
+  version: 3;
   ideas: Idea[];
+  box: BoxItem[];
   settings: {
     activeLimit: number;
   };
-  lastActivationWeek: string;
+  domainWindows: Record<Domain, { nextOpenAt: number }>;
+  lastBoxOpenAt?: number;
+};
+
+type AppStateV2 = {
+  version: 2;
+  ideas: Idea[];
+  settings?: {
+    activeLimit?: number;
+  };
+  lastActivationWeek?: string;
 };
 
 type AppStateV1 = {
@@ -69,18 +106,69 @@ type AppStateV1 = {
   };
 };
 
-const STORAGE_KEY = "kyd_state_v2";
-const LEGACY_STORAGE_KEY = "kyd_state_v1";
+const STORAGE_KEY = "kyd_state_v3";
+const LEGACY_STORAGE_KEY = "kyd_state_v2";
+const LEGACY_STORAGE_KEY_V1 = "kyd_state_v1";
 
+const domains: Domain[] = [
+  "business",
+  "career",
+  "relationships",
+  "dating",
+  "lifestyle",
+  "random",
+];
+
+const domainLabels: Record<Domain, string> = {
+  business: "Business",
+  career: "Career",
+  relationships: "Relationships",
+  dating: "Dating",
+  lifestyle: "Lifestyle",
+  random: "Random",
+};
+
+const defaultDaysByDomain: Record<Domain, number> = {
+  business: 21,
+  career: 21,
+  relationships: 14,
+  dating: 14,
+  lifestyle: 14,
+  random: 7,
+};
+
+const boxKillReasons: Array<{ code: KillReasonCode; label: string }> = [
+  { code: "NO_LONGER_RELEVANT", label: "No longer relevant" },
+  { code: "TOO_BIG", label: "Too big" },
+  { code: "NO_CLEAR_USER_PROBLEM", label: "No clear user problem" },
+  { code: "LOST_INTEREST", label: "Lost interest" },
+  { code: "BLOCKED", label: "Blocked" },
+  { code: "OTHER", label: "Other" },
+];
 
 // ---------------------------
 // Storage adapter (localStorage)
 // ---------------------------
-function defaultState(): AppState {
-  return { version: 2, ideas: [], settings: { activeLimit: 5 }, lastActivationWeek: "" };
+function defaultDomainWindows(now: number): AppState["domainWindows"] {
+  return domains.reduce((acc, domain) => {
+    acc[domain] = { nextOpenAt: now };
+    return acc;
+  }, {} as AppState["domainWindows"]);
 }
 
-function migrateStateV1(data: AppStateV1): AppState {
+function defaultState(): AppState {
+  const now = Date.now();
+  return {
+    version: 3,
+    ideas: [],
+    box: [],
+    settings: { activeLimit: 5 },
+    domainWindows: defaultDomainWindows(now),
+    lastBoxOpenAt: undefined,
+  };
+}
+
+function migrateStateV1(data: AppStateV1): AppStateV2 {
   const ideas: Idea[] = (data.ideas ?? []).map((idea): Idea => {
     const proofValue = idea.proofValue?.trim();
 
@@ -128,6 +216,42 @@ function migrateStateV1(data: AppStateV1): AppState {
   };
 }
 
+function randomDelayMs(minHours: number, maxHours: number) {
+  const minMs = minHours * 60 * 60 * 1000;
+  const maxMs = maxHours * 60 * 60 * 1000;
+  return minMs + Math.random() * (maxMs - minMs);
+}
+
+function migrateStateV2(data: AppStateV2): AppState {
+  const now = Date.now();
+  const backlogItems = data.ideas.filter((idea) => idea.status === "backlog");
+  const box: BoxItem[] = backlogItems.map((idea) => {
+    const proofLine = idea.proofDefinition.trim()
+      ? `\nSuccess: ${idea.proofDefinition.trim()}`
+      : "";
+
+    return {
+      id: uid(),
+      content: `${idea.title.trim()}${proofLine}`,
+      domain: "random",
+      createdAt: idea.createdAt,
+      nextRevealAt: idea.createdAt + randomDelayMs(6, 72),
+      returnCount: 0,
+      origin: "captured",
+    };
+  });
+
+  const ideas = data.ideas.filter((idea) => idea.status !== "backlog");
+
+  return {
+    version: 3,
+    ideas,
+    box,
+    settings: { activeLimit: data.settings?.activeLimit ?? 5 },
+    domainWindows: defaultDomainWindows(now),
+    lastBoxOpenAt: undefined,
+  };
+}
 
 function loadState(): AppState {
   if (typeof window === "undefined") {
@@ -136,27 +260,42 @@ function loadState(): AppState {
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      const legacyRaw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
-      if (!legacyRaw) return defaultState();
-      const legacyParsed = JSON.parse(legacyRaw) as AppStateV1;
-      if (!legacyParsed || legacyParsed.version !== 1 || !Array.isArray(legacyParsed.ideas)) {
-        return defaultState();
+    if (raw) {
+      const parsed = JSON.parse(raw) as AppState;
+      if (
+        parsed &&
+        parsed.version === 3 &&
+        Array.isArray(parsed.ideas) &&
+        Array.isArray(parsed.box)
+      ) {
+        return {
+          version: 3,
+          ideas: parsed.ideas,
+          box: parsed.box,
+          settings: parsed.settings ?? { activeLimit: 5 },
+          domainWindows: parsed.domainWindows ?? defaultDomainWindows(Date.now()),
+          lastBoxOpenAt: parsed.lastBoxOpenAt,
+        };
       }
-      return migrateStateV1(legacyParsed);
     }
 
-    const parsed = JSON.parse(raw) as AppState;
-    if (!parsed || parsed.version !== 2 || !Array.isArray(parsed.ideas)) {
-      return defaultState();
+    const legacyRaw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacyRaw) {
+      const legacyParsed = JSON.parse(legacyRaw) as AppStateV2;
+      if (legacyParsed && legacyParsed.version === 2 && Array.isArray(legacyParsed.ideas)) {
+        return migrateStateV2(legacyParsed);
+      }
     }
 
-    return {
-      version: 2,
-      ideas: parsed.ideas,
-      settings: parsed.settings ?? { activeLimit: 5 },
-      lastActivationWeek: parsed.lastActivationWeek ?? "",
-    };
+    const legacyRawV1 = window.localStorage.getItem(LEGACY_STORAGE_KEY_V1);
+    if (legacyRawV1) {
+      const legacyParsed = JSON.parse(legacyRawV1) as AppStateV1;
+      if (legacyParsed && legacyParsed.version === 1 && Array.isArray(legacyParsed.ideas)) {
+        return migrateStateV2(migrateStateV1(legacyParsed));
+      }
+    }
+
+    return defaultState();
   } catch {
     return defaultState();
   }
@@ -198,19 +337,19 @@ function msToParts(ms: number) {
   return { days, hours, minutes, seconds };
 }
 
-function isExpired(idea: Idea, now: number) {
-  return idea.status === "active" && now >= idea.deadlineAt;
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
 
-function yearWeek(date: Date) {
-  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const dayNr = (target.getDay() + 6) % 7;
-  target.setDate(target.getDate() - dayNr + 3);
-  const firstThursday = new Date(target.getFullYear(), 0, 4);
-  const firstDayNr = (firstThursday.getDay() + 6) % 7;
-  firstThursday.setDate(firstThursday.getDate() - firstDayNr + 3);
-  const week = 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
-  return `${target.getFullYear()}-W${String(week).padStart(2, "0")}`;
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function pickDomainForExpired(title: string) {
+  const lowered = title.toLowerCase();
+  const keywords = ["mvp", "ship", "launch", "release", "deploy", "scale", "growth"];
+  const isBusiness = keywords.some((keyword) => lowered.includes(keyword));
+  return isBusiness ? "business" : "career";
 }
 
 const killReasonLabels: Record<KillReasonCode, string> = {
@@ -223,60 +362,63 @@ const killReasonLabels: Record<KillReasonCode, string> = {
   OTHER: "Other",
 };
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function cx(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(" ");
-}
-
 // ---------------------------
 // Page
 // ---------------------------
 export default function Page() {
-  const [state, setState] = useState<AppState>(() => ({
-    version: 2,
-    ideas: [],
-    settings: { activeLimit: 5 },
-    lastActivationWeek: "",
-  }));
+  const [state, setState] = useState<AppState>(() => defaultState());
 
   const [hydrated, setHydrated] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
   const decisionRef = React.useRef<HTMLElement | null>(null);
-const [decisionFlash, setDecisionFlash] = useState(false);
-
+  const [decisionFlash, setDecisionFlash] = useState(false);
 
   // Edit panel state
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editDays, setEditDays] = useState<number>(14);
   const [editProofType, setEditProofType] = useState<ProofType>("link");
-  const [editStatus, setEditStatus] = useState<"backlog" | "active">("backlog");
   const [editProblemStatement, setEditProblemStatement] = useState("");
   const [editAudience, setEditAudience] = useState("");
   const [editProofDefinition, setEditProofDefinition] = useState("");
   const [editKillTrigger, setEditKillTrigger] = useState("");
   const [editNotes, setEditNotes] = useState("");
   const [editBetCommitted, setEditBetCommitted] = useState(false);
-  const [editActivationError, setEditActivationError] = useState("");
 
-  // Backlog collapse state
-  const [backlogOpen, setBacklogOpen] = useState(false);
+  // Box intake state
+  const [boxContent, setBoxContent] = useState("");
+  const [boxDomain, setBoxDomain] = useState<Domain>("random");
 
-  // New idea form
-  const [title, setTitle] = useState("");
-  const [days, setDays] = useState<number>(14);
-  const [proofType, setProofType] = useState<ProofType>("link");
-  const [addAsActive, setAddAsActive] = useState(false);
-  const [addProofDefinition, setAddProofDefinition] = useState("");
-  const [addBetCommitted, setAddBetCommitted] = useState(false);
-  const [addActivationError, setAddActivationError] = useState("");
-  const [promoteActivationError, setPromoteActivationError] = useState<{
-    id: string;
-    message: string;
-  } | null>(null);
+  // Box animation + open state
+  const [boxOpen, setBoxOpen] = useState(false);
+  const [boxDrop, setBoxDrop] = useState(false);
+  const [openChooser, setOpenChooser] = useState(false);
+
+  // Box reveal + decision state
+  const [revealedItemId, setRevealedItemId] = useState<string | null>(null);
+  const [revealedDomain, setRevealedDomain] = useState<Domain | null>(null);
+  const [promoteTitle, setPromoteTitle] = useState("");
+  const [promoteProofDefinition, setPromoteProofDefinition] = useState("");
+  const [promoteBetCommitted, setPromoteBetCommitted] = useState(false);
+  const [promoteDays, setPromoteDays] = useState<number>(14);
+  const [promoteError, setPromoteError] = useState("");
+  const [returnReason, setReturnReason] = useState("");
+  const [returnError, setReturnError] = useState("");
+  const [boxKillReason, setBoxKillReason] = useState<KillReasonCode | "">("");
+  const [boxKillDetail, setBoxKillDetail] = useState("");
+
+  // Early unlock
+  const [earlyUnlockDomain, setEarlyUnlockDomain] = useState<Domain | null>(null);
+  const [earlyUnlockReason, setEarlyUnlockReason] = useState("");
+
+  // Accountability modal
+  const [accountabilityItemId, setAccountabilityItemId] = useState<string | null>(null);
+  const [accountabilityMode, setAccountabilityMode] = useState<"idle" | "respond" | "return" | "kill">(
+    "idle"
+  );
+  const [accountabilityReturnReason, setAccountabilityReturnReason] = useState("");
+  const [accountabilityKillReason, setAccountabilityKillReason] = useState<KillReasonCode | "">("");
+  const [accountabilityKillDetail, setAccountabilityKillDetail] = useState("");
 
   // Selection panel
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -287,26 +429,21 @@ const [decisionFlash, setDecisionFlash] = useState(false);
   const isSelectedResolved =
     selectedIdea?.status === "shipped" || selectedIdea?.status === "killed";
 
+  const revealedItem = useMemo(
+    () => state.box.find((item) => item.id === revealedItemId) ?? null,
+    [revealedItemId, state.box]
+  );
+
+  // Auto-scroll + subtle flash on selection
   useEffect(() => {
-    setAddActivationError("");
-  }, [addBetCommitted, addProofDefinition, addAsActive]);
+    if (!selectedIdea) return;
 
-  useEffect(() => {
-    setEditActivationError("");
-  }, [editBetCommitted, editProofDefinition, editStatus]);
+    decisionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
 
-// Auto-scroll + subtle flash on selection
-useEffect(() => {
-  if (!selectedIdea) return;
-
-  decisionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-
-  setDecisionFlash(true);
-  const t = setTimeout(() => setDecisionFlash(false), 900);
-  return () => clearTimeout(t);
-}, [selectedIdea?.id]);
-
-
+    setDecisionFlash(true);
+    const t = setTimeout(() => setDecisionFlash(false), 900);
+    return () => clearTimeout(t);
+  }, [selectedIdea?.id]);
 
   // Load on mount
   useEffect(() => {
@@ -327,44 +464,62 @@ useEffect(() => {
     return () => window.clearInterval(t);
   }, []);
 
+  // Expiry flow: move expired actives back into the box
   useEffect(() => {
     if (!hydrated) return;
-    const expiredIds = state.ideas.filter((idea) => isExpired(idea, now));
-    if (expiredIds.length === 0) return;
+    const expired = state.ideas.filter((idea) => idea.status === "active" && now >= idea.deadlineAt);
+    if (expired.length === 0) return;
 
     setState((prev) => {
-      let changed = false;
-      const ideas = prev.ideas.map((idea) => {
-        if (idea.status === "active" && now >= idea.deadlineAt) {
-          changed = true;
-          return {
-  ...idea,
-  status: "killed" as const,
-  resolvedAt: now,
-  killReasonCode: "TIME_EXPIRED" as const,
-  killReasonDetail: "",
-};
+      const expiredIdeas = prev.ideas.filter(
+        (idea) => idea.status === "active" && now >= idea.deadlineAt
+      );
+      if (expiredIdeas.length === 0) return prev;
 
-        }
-        return idea;
+      const nextBoxItems = expiredIdeas.map((idea) => {
+        const proofLine = idea.proofDefinition.trim()
+          ? `\nSuccess: ${idea.proofDefinition.trim()}`
+          : "";
+        return {
+          id: uid(),
+          content: `EXPIRED: ${idea.title.trim()}${proofLine}`,
+          domain: pickDomainForExpired(idea.title),
+          createdAt: now,
+          nextRevealAt: now,
+          returnCount: 0,
+          origin: "expired_active" as const,
+          linkedIdeaId: idea.id,
+        };
       });
-      return changed ? { ...prev, ideas } : prev;
+
+      return {
+        ...prev,
+        ideas: prev.ideas.filter(
+          (idea) => !(idea.status === "active" && now >= idea.deadlineAt)
+        ),
+        box: [...nextBoxItems, ...prev.box],
+      };
     });
   }, [hydrated, now, state.ideas]);
+
+  // Accountability modal trigger
+  useEffect(() => {
+    if (!hydrated) return;
+    if (accountabilityItemId) return;
+    const unresolved = state.box.find(
+      (item) => item.earlyUnlockDebt && !item.earlyUnlockDebt.resolved
+    );
+    if (unresolved) {
+      setAccountabilityItemId(unresolved.id);
+      setAccountabilityMode("respond");
+    }
+  }, [accountabilityItemId, hydrated, state.box]);
 
   const activeIdeas = useMemo(
     () =>
       state.ideas
         .filter((i) => i.status === "active")
         .sort((a, b) => a.deadlineAt - b.deadlineAt),
-    [state.ideas]
-  );
-
-  const backlogIdeas = useMemo(
-    () =>
-      state.ideas
-        .filter((i) => i.status === "backlog")
-        .sort((a, b) => b.createdAt - a.createdAt),
     [state.ideas]
   );
 
@@ -387,7 +542,7 @@ useEffect(() => {
   const canAddToActive = activeIdeas.length < state.settings.activeLimit;
 
   const expiredCount = useMemo(
-    () => activeIdeas.filter((i) => isExpired(i, now)).length,
+    () => activeIdeas.filter((i) => now >= i.deadlineAt).length,
     [activeIdeas, now]
   );
 
@@ -415,7 +570,7 @@ useEffect(() => {
 
   const stats = useMemo(
     () => ({
-      backlog: backlogIdeas.length,
+      box: state.box.length,
       active: `${activeIdeas.length}/${state.settings.activeLimit}`,
       shipped: shippedIdeas.length,
       killed: killedIdeas.length,
@@ -424,15 +579,59 @@ useEffect(() => {
       killedThisMonth,
     }),
     [
-      backlogIdeas.length,
       activeIdeas.length,
-      shippedIdeas.length,
-      killedIdeas.length,
       expiredCount,
-      shippedThisMonth,
+      killedIdeas.length,
       killedThisMonth,
+      shippedIdeas.length,
+      shippedThisMonth,
+      state.box.length,
       state.settings.activeLimit,
     ]
+  );
+
+  const eligibleByDomain = useMemo(() => {
+    const map: Record<Domain, BoxItem[]> = {
+      business: [],
+      career: [],
+      relationships: [],
+      dating: [],
+      lifestyle: [],
+      random: [],
+    };
+    state.box.forEach((item) => {
+      if (item.nextRevealAt <= now) {
+        map[item.domain].push(item);
+      }
+    });
+    return map;
+  }, [state.box, now]);
+
+  const domainStatus = useMemo(() => {
+    return domains.reduce((acc, domain) => {
+      const nextOpenAt = state.domainWindows[domain]?.nextOpenAt ?? now;
+      const isOpenWindow = now >= nextOpenAt;
+      const hasEarlyUnlockDebt = eligibleByDomain[domain].some(
+        (item) => item.earlyUnlockDebt && !item.earlyUnlockDebt.resolved
+      );
+      acc[domain] = {
+        nextOpenAt,
+        isOpenWindow,
+        hasEligible: eligibleByDomain[domain].length > 0,
+        hasEarlyUnlockDebt,
+      };
+      return acc;
+    }, {} as Record<Domain, { nextOpenAt: number; isOpenWindow: boolean; hasEligible: boolean; hasEarlyUnlockDebt: boolean }>);
+  }, [eligibleByDomain, now, state.domainWindows]);
+
+  const openableDomains = useMemo(
+    () =>
+      domains.filter((domain) => {
+        const status = domainStatus[domain];
+        const isOpen = status.isOpenWindow || status.hasEarlyUnlockDebt;
+        return isOpen && status.hasEligible;
+      }),
+    [domainStatus]
   );
 
   // Preload edit fields when selection changes
@@ -441,14 +640,12 @@ useEffect(() => {
     setEditing(false);
     setEditTitle(selectedIdea.title);
     setEditProofType(selectedIdea.proofType);
-    setEditStatus(selectedIdea.status === "active" ? "active" : "backlog");
     setEditProblemStatement(selectedIdea.problemStatement);
     setEditAudience(selectedIdea.audience);
     setEditProofDefinition(selectedIdea.proofDefinition);
     setEditKillTrigger(selectedIdea.killTrigger);
     setEditNotes(selectedIdea.notes);
     setEditBetCommitted(selectedIdea.betCommitted);
-    setEditActivationError("");
 
     const remainingDays = Math.ceil(
       (selectedIdea.deadlineAt - Date.now()) / (24 * 60 * 60 * 1000)
@@ -456,16 +653,181 @@ useEffect(() => {
     setEditDays(clamp(isFinite(remainingDays) ? remainingDays : 14, 1, 90));
   }, [selectedIdea?.id]);
 
-  function activationBlockMessage(betCommitted: boolean, proofDefinition: string) {
-    if (!betCommitted) return "Confirm the $100 bet to activate.";
-    if (!proofDefinition.trim()) return "Define your proof before activating.";
+  useEffect(() => {
+    if (!revealedItem || !revealedDomain) return;
+    setPromoteTitle(revealedItem.content.split("\n")[0]?.slice(0, 120) ?? "");
+    setPromoteProofDefinition("");
+    setPromoteBetCommitted(false);
+    setPromoteDays(defaultDaysByDomain[revealedDomain]);
+    setPromoteError("");
+    setReturnReason("");
+    setReturnError("");
+    setBoxKillReason("");
+    setBoxKillDetail("");
+  }, [revealedItemId, revealedDomain, revealedItem]);
 
-    const thisWeek = yearWeek(new Date(now));
-    if (state.lastActivationWeek === thisWeek) {
-      return "Weekly activation limit reached. Try again next week.";
+  function animateBoxOpen() {
+    setBoxOpen(true);
+    window.setTimeout(() => setBoxOpen(false), 800);
+  }
+
+  function animateBoxDrop() {
+    setBoxDrop(true);
+    window.setTimeout(() => setBoxDrop(false), 700);
+  }
+
+  function captureToBox() {
+    const content = boxContent.trim();
+    if (!content) return;
+
+    const createdAt = Date.now();
+    const nextRevealAt = createdAt + randomDelayMs(6, 72);
+
+    const newItem: BoxItem = {
+      id: uid(),
+      content,
+      domain: boxDomain,
+      createdAt,
+      nextRevealAt,
+      returnCount: 0,
+      origin: "captured",
+    };
+
+    setState((prev) => ({
+      ...prev,
+      box: [newItem, ...prev.box],
+    }));
+
+    animateBoxOpen();
+    animateBoxDrop();
+
+    setBoxContent("");
+    setBoxDomain("random");
+  }
+
+  function openBox(domain?: Domain) {
+    const options = openableDomains;
+    if (options.length === 0) return;
+    if (!domain && options.length > 1) {
+      setOpenChooser(true);
+      return;
     }
 
-    return "";
+    const targetDomain = domain ?? options[0];
+    const eligible = eligibleByDomain[targetDomain]
+      .slice()
+      .sort((a, b) => a.createdAt - b.createdAt);
+
+    const item = eligible[0];
+    if (!item) return;
+
+    setRevealedItemId(item.id);
+    setRevealedDomain(targetDomain);
+    setOpenChooser(false);
+
+    animateBoxOpen();
+    animateBoxDrop();
+
+    setState((prev) => ({
+      ...prev,
+      lastBoxOpenAt: now,
+    }));
+  }
+
+  function resolveEarlyUnlock(itemId: string) {
+    setState((prev) => ({
+      ...prev,
+      box: prev.box.map((item) =>
+        item.id === itemId && item.earlyUnlockDebt
+          ? {
+              ...item,
+              earlyUnlockDebt: {
+                ...item.earlyUnlockDebt,
+                resolved: true,
+              },
+            }
+          : item
+      ),
+    }));
+  }
+
+  function returnToBox(itemId: string, reason: string, resolveDebt = false) {
+    setState((prev) => ({
+      ...prev,
+      box: prev.box.map((item) => {
+        if (item.id !== itemId) return item;
+        const nextCount = item.returnCount + 1;
+        const cooldown =
+          24 * 60 * 60 * 1000 * (1 + nextCount) + Math.random() * 12 * 60 * 60 * 1000;
+        return {
+          ...item,
+          returnCount: nextCount,
+          lastReturnedReason: reason.trim().slice(0, 15),
+          nextRevealAt: Date.now() + cooldown,
+          earlyUnlockDebt: resolveDebt && item.earlyUnlockDebt
+            ? { ...item.earlyUnlockDebt, resolved: true }
+            : item.earlyUnlockDebt,
+        };
+      }),
+    }));
+  }
+
+  function killBoxItem(itemId: string, resolveDebt = false) {
+    if (resolveDebt) {
+      resolveEarlyUnlock(itemId);
+    }
+    setState((prev) => ({
+      ...prev,
+      box: prev.box.filter((item) => item.id !== itemId),
+    }));
+  }
+
+  function promoteBoxItem(item: BoxItem) {
+    const title = promoteTitle.trim();
+    const proofDefinition = promoteProofDefinition.trim();
+
+    if (!title || !proofDefinition || !promoteBetCommitted) {
+      setPromoteError("Set a title, proof definition, and confirm the bet to promote.");
+      return;
+    }
+    if (!canAddToActive) {
+      setPromoteError("Active list is full. Ship or kill something to free a slot.");
+      return;
+    }
+
+    const createdAt = Date.now();
+    const useDays = clamp(promoteDays || defaultDaysByDomain[item.domain], 1, 90);
+    const deadlineAt = createdAt + useDays * 24 * 60 * 60 * 1000;
+
+    const newIdea: Idea = {
+      id: uid(),
+      title,
+      createdAt,
+      deadlineAt,
+      proofType: "link",
+      status: "active",
+      problemStatement: "",
+      audience: "",
+      proofDefinition,
+      killTrigger: "",
+      notes: "",
+      betCommitted: promoteBetCommitted,
+      proofs: [],
+    };
+
+    setState((prev) => ({
+      ...prev,
+      ideas: [newIdea, ...prev.ideas],
+      box: prev.box.filter((boxItem) => boxItem.id !== item.id),
+      domainWindows: {
+        ...prev.domainWindows,
+        [item.domain]: { nextOpenAt: Date.now() + 24 * 60 * 60 * 1000 },
+      },
+    }));
+
+    setSelectedId(newIdea.id);
+    setRevealedItemId(null);
+    setRevealedDomain(null);
   }
 
   function updateIdea() {
@@ -483,30 +845,17 @@ useEffect(() => {
     const t = editTitle.trim();
     if (!t) return;
 
-    const movingToActive =
-      editStatus === "active" && selectedIdea.status !== "active";
-    if (movingToActive && !canAddToActive) return;
-    if (movingToActive) {
-      const gateMessage = activationBlockMessage(editBetCommitted, editProofDefinition);
-      if (gateMessage) {
-        setEditActivationError(gateMessage);
-        return;
-      }
-    }
-
     const useDays = clamp(editDays || 14, 1, 90);
     const newDeadlineAt = Date.now() + useDays * 24 * 60 * 60 * 1000;
 
     setState((prev) => ({
       ...prev,
-      lastActivationWeek: movingToActive ? yearWeek(new Date(now)) : prev.lastActivationWeek,
       ideas: prev.ideas.map((i) =>
         i.id === selectedIdea.id
           ? {
               ...i,
               title: t,
               proofType: editProofType,
-              status: editStatus,
               deadlineAt: newDeadlineAt,
               problemStatement: editProblemStatement,
               audience: editAudience,
@@ -520,84 +869,6 @@ useEffect(() => {
     }));
 
     setEditing(false);
-    setEditActivationError("");
-
-    if (editStatus === "active") setBacklogOpen(false);
-    if (editStatus === "backlog") setSelectedId(null);
-  }
-
-  function addIdea() {
-    const t = title.trim();
-    if (!t) return;
-
-    const createdAt = Date.now();
-    const useDays = clamp(days || 14, 1, 90);
-    const deadlineAt = createdAt + useDays * 24 * 60 * 60 * 1000;
-
-    const wantActive = addAsActive && canAddToActive;
-    if (wantActive) {
-      const gateMessage = activationBlockMessage(addBetCommitted, addProofDefinition);
-      if (gateMessage) {
-        setAddActivationError(gateMessage);
-        return;
-      }
-    }
-
-    const newIdea: Idea = {
-      id: uid(),
-      title: t,
-      createdAt,
-      deadlineAt,
-      proofType,
-      status: wantActive ? "active" : "backlog",
-      problemStatement: "",
-      audience: "",
-      proofDefinition: addProofDefinition.trim(),
-      killTrigger: "",
-      notes: "",
-      betCommitted: addBetCommitted,
-      proofs: [],
-    };
-
-    setState((prev) => ({
-      ...prev,
-      lastActivationWeek: wantActive ? yearWeek(new Date(now)) : prev.lastActivationWeek,
-      ideas: [newIdea, ...prev.ideas],
-    }));
-
-    setTitle("");
-    setAddAsActive(false);
-    setAddProofDefinition("");
-    setAddBetCommitted(false);
-    setAddActivationError("");
-
-    if (newIdea.status === "active") {
-      setSelectedId(newIdea.id);
-    }
-  }
-
-  function promoteToActive(id: string) {
-    if (!canAddToActive) return;
-
-    const target = state.ideas.find((idea) => idea.id === id);
-    if (!target) return;
-
-    const gateMessage = activationBlockMessage(target.betCommitted, target.proofDefinition);
-    if (gateMessage) {
-      setPromoteActivationError({ id, message: gateMessage });
-      return;
-    }
-
-    setState((prev) => ({
-      ...prev,
-      lastActivationWeek: yearWeek(new Date(now)),
-      ideas: prev.ideas.map((i) =>
-        i.id === id && i.status === "backlog" ? { ...i, status: "active" } : i
-      ),
-    }));
-    setPromoteActivationError(null);
-
-    setBacklogOpen(false);
   }
 
   function shipIdea(id: string, proofs: Idea["proofs"]) {
@@ -650,10 +921,120 @@ useEffect(() => {
   }
 
   function resetAll() {
-    setState({ version: 2, ideas: [], settings: { activeLimit: 5 }, lastActivationWeek: "" });
+    setState(defaultState());
     setSelectedId(null);
-    setBacklogOpen(false);
     setEditing(false);
+    setRevealedItemId(null);
+    setRevealedDomain(null);
+  }
+
+  function handleReturn() {
+    if (!revealedItem) return;
+    const reason = returnReason.trim();
+    if (!reason) {
+      setReturnError("Add a short reason (max 15 chars).");
+      return;
+    }
+    if (reason.length > 15) {
+      setReturnError("Keep it ≤ 15 chars.");
+      return;
+    }
+
+    returnToBox(revealedItem.id, reason);
+    setState((prev) => ({
+      ...prev,
+      domainWindows: {
+        ...prev.domainWindows,
+        [revealedItem.domain]: { nextOpenAt: Date.now() + 24 * 60 * 60 * 1000 },
+      },
+    }));
+
+    setRevealedItemId(null);
+    setRevealedDomain(null);
+    setReturnReason("");
+    setReturnError("");
+  }
+
+  function handleKill() {
+    if (!revealedItem || !boxKillReason) return;
+
+    killBoxItem(revealedItem.id);
+    setState((prev) => ({
+      ...prev,
+      domainWindows: {
+        ...prev.domainWindows,
+        [revealedItem.domain]: { nextOpenAt: Date.now() + 24 * 60 * 60 * 1000 },
+      },
+    }));
+
+    setRevealedItemId(null);
+    setRevealedDomain(null);
+    setBoxKillReason("");
+    setBoxKillDetail("");
+  }
+
+  function handleEarlyUnlock() {
+    if (!earlyUnlockDomain) return;
+    const reason = earlyUnlockReason.trim();
+    if (!reason || reason.length > 30) return;
+
+    const eligible = eligibleByDomain[earlyUnlockDomain]
+      .slice()
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const target = eligible[0];
+    if (!target) return;
+
+    setState((prev) => ({
+      ...prev,
+      box: prev.box.map((item) =>
+        item.id === target.id
+          ? {
+              ...item,
+              earlyUnlockDebt: {
+                reason,
+                createdAt: Date.now(),
+              },
+            }
+          : item
+      ),
+      domainWindows: {
+        ...prev.domainWindows,
+        [earlyUnlockDomain]: { nextOpenAt: Date.now() + 24 * 60 * 60 * 1000 },
+      },
+    }));
+
+    setEarlyUnlockDomain(null);
+    setEarlyUnlockReason("");
+  }
+
+  function handleAccountabilityYes() {
+    if (!accountabilityItemId) return;
+    resolveEarlyUnlock(accountabilityItemId);
+    setAccountabilityItemId(null);
+    setAccountabilityMode("idle");
+    setAccountabilityReturnReason("");
+    setAccountabilityKillReason("");
+    setAccountabilityKillDetail("");
+  }
+
+  function handleAccountabilityReturn() {
+    if (!accountabilityItemId) return;
+    const reason = accountabilityReturnReason.trim();
+    if (!reason || reason.length > 15) return;
+
+    returnToBox(accountabilityItemId, reason, true);
+    setAccountabilityItemId(null);
+    setAccountabilityMode("idle");
+    setAccountabilityReturnReason("");
+  }
+
+  function handleAccountabilityKill() {
+    if (!accountabilityItemId || !accountabilityKillReason) return;
+    killBoxItem(accountabilityItemId, true);
+    setAccountabilityItemId(null);
+    setAccountabilityMode("idle");
+    setAccountabilityKillReason("");
+    setAccountabilityKillDetail("");
   }
 
   if (!hydrated) {
@@ -683,28 +1064,27 @@ useEffect(() => {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="flex items-center gap-3">
-  {/* Tiny brand mark */}
-  <div className="h-9 w-9 rounded-2xl border border-zinc-800 bg-zinc-950/40 backdrop-blur">
-    <div className="h-full w-full rounded-2xl bg-[radial-gradient(circle_at_30%_30%,rgba(34,211,238,0.55),transparent_55%),radial-gradient(circle_at_70%_70%,rgba(232,121,249,0.45),transparent_60%)]" />
-  </div>
+                {/* Tiny brand mark */}
+                <div className="h-9 w-9 rounded-2xl border border-zinc-800 bg-zinc-950/40 backdrop-blur">
+                  <div className="h-full w-full rounded-2xl bg-[radial-gradient(circle_at_30%_30%,rgba(34,211,238,0.55),transparent_55%),radial-gradient(circle_at_70%_70%,rgba(232,121,249,0.45),transparent_60%)]" />
+                </div>
 
-  <div>
-    <h1 className="relative text-3xl font-semibold tracking-tight">
-      {/* soft glow */}
-      <span className="pointer-events-none absolute -inset-x-3 -inset-y-2 -z-10 blur-2xl opacity-40 bg-[radial-gradient(circle_at_30%_40%,rgba(34,211,238,0.35),transparent_55%),radial-gradient(circle_at_70%_40%,rgba(232,121,249,0.30),transparent_60%)]" />
-      {/* gradient title */}
-      <span className="bg-gradient-to-r from-cyan-200 via-zinc-100 to-fuchsia-200 bg-clip-text text-transparent">
-        Kill Your Darlings
-      </span>
-    </h1>
+                <div>
+                  <h1 className="relative text-3xl font-semibold tracking-tight">
+                    {/* soft glow */}
+                    <span className="pointer-events-none absolute -inset-x-3 -inset-y-2 -z-10 blur-2xl opacity-40 bg-[radial-gradient(circle_at_30%_40%,rgba(34,211,238,0.35),transparent_55%),radial-gradient(circle_at_70%_40%,rgba(232,121,249,0.30),transparent_60%)]" />
+                    {/* gradient title */}
+                    <span className="bg-gradient-to-r from-cyan-200 via-zinc-100 to-fuchsia-200 bg-clip-text text-transparent">
+                      Kill Your Darlings
+                    </span>
+                  </h1>
 
-    <p className="mt-1 text-sm text-zinc-400">
-      Run <span className="text-zinc-200">max 5</span>. Ship or kill.{" "}
-      <span className="text-zinc-200">Proof required.</span>
-    </p>
-  </div>
-</div>
-
+                  <p className="mt-1 text-sm text-zinc-400">
+                    Run <span className="text-zinc-200">max 5</span>. Ship or kill.{" "}
+                    <span className="text-zinc-200">Proof required.</span>
+                  </p>
+                </div>
+              </div>
             </div>
 
             <button
@@ -717,7 +1097,7 @@ useEffect(() => {
           </div>
 
           <div className="grid grid-cols-2 gap-2 md:grid-cols-7">
-            <StatChip label="Backlog" value={stats.backlog} tone="backlog" />
+            <StatChip label="Box" value={stats.box} tone="backlog" />
             <StatChip label="Active" value={stats.active} tone="active" />
             <StatChip label="Shipped" value={stats.shipped} tone="shipped" />
             <StatChip label="Shipped (mo)" value={stats.shippedThisMonth} tone="shipped" />
@@ -731,122 +1111,320 @@ useEffect(() => {
           </div>
         </header>
 
-        {/* Add Idea (stacked) */}
+        {/* Box */}
         <section className="relative mt-8 rounded-2xl border border-zinc-800/70 bg-zinc-900/20 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_0_40px_rgba(34,211,238,0.06)] backdrop-blur">
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent" />
 
-          <div className="flex flex-col gap-4">
-            <div>
-              <label className="text-xs text-zinc-400">Idea</label>
-              <input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Ship the MVP landing page"
-                className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-                maxLength={120}
-              />
-              <div className="mt-1 text-[11px] text-zinc-500">{title.length}/120</div>
-            </div>
-
-            <div>
-              <label className="text-xs text-zinc-400">Deadline (days)</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={days === 0 ? "" : String(days)}
-                onChange={(e) => {
-                  const val = e.target.value.replace(/\D/g, "");
-                  if (val === "") {
-                    setDays(0);
-                    return;
-                  }
-                  setDays(clamp(Number(val), 1, 90));
-                }}
-                onBlur={() => {
-                  if (!days || days < 1) setDays(14);
-                }}
-                className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
-                placeholder="e.g. 14"
-              />
-              <div className="mt-1 text-[11px] text-zinc-500">
-                Tip: keep it tight. 7–21 days is the sweet spot.
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs text-zinc-400">Proof</label>
-              <select
-                value={proofType}
-                onChange={(e) => setProofType(e.target.value as ProofType)}
-                className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
-              >
-                <option value="link">Link</option>
-                <option value="text">Text</option>
-              </select>
-
-              <div className="mt-3">
-                <label className="text-xs text-zinc-400">Proof definition</label>
-                <input
-                  value={addProofDefinition}
-                  onChange={(e) => setAddProofDefinition(e.target.value)}
-                  placeholder="What counts as success?"
-                  className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-                />
-                <div className="mt-1 text-[11px] text-zinc-500">
-                  Required before activating. Keep it measurable.
+          <div className="flex flex-col gap-6 md:flex-row">
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">The Box</h2>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    One intake. One reveal. Domains control when you can open.
+                  </p>
                 </div>
+                <button
+                  onClick={() => openBox()}
+                  disabled={openableDomains.length === 0}
+                  className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Open the Box
+                </button>
               </div>
 
-              <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <input
-                    id="addAsActive"
-                    type="checkbox"
-                    checked={addAsActive}
-                    onChange={(e) => setAddAsActive(e.target.checked)}
-                    disabled={!canAddToActive}
-                    className="h-4 w-4 accent-zinc-100"
+              <div className="mt-4 flex flex-wrap gap-2">
+                {domains.map((domain) => {
+                  const status = domainStatus[domain];
+                  const isOpen = status.isOpenWindow;
+                  const isEarly = !isOpen && status.hasEarlyUnlockDebt;
+                  const chipTone = isOpen
+                    ? "border-lime-300/30 bg-lime-200/10 text-lime-200"
+                    : isEarly
+                    ? "border-cyan-300/40 bg-cyan-200/10 text-cyan-200"
+                    : "border-zinc-800 bg-zinc-950/40 text-zinc-400";
+
+                  return (
+                    <div
+                      key={domain}
+                      className={cx(
+                        "flex items-center gap-2 rounded-full border px-3 py-1 text-[11px]",
+                        chipTone
+                      )}
+                    >
+                      <span>{domainLabels[domain]}</span>
+                      {isOpen && <span className="text-[10px] uppercase">Open</span>}
+                      {!isOpen && isEarly && <span className="text-[10px] uppercase">Early</span>}
+                      {!isOpen && !isEarly && (
+                        <span className="text-[10px] uppercase">
+                          Locked
+                        </span>
+                      )}
+                      {!isOpen && status.hasEligible && !isEarly && (
+                        <button
+                          onClick={() => setEarlyUnlockDomain(domain)}
+                          className="rounded-full border border-cyan-400/30 px-2 py-0.5 text-[10px] text-cyan-200"
+                        >
+                          Early unlock
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {openChooser && openableDomains.length > 1 && (
+                <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3">
+                  <div className="text-xs text-zinc-400">Choose a domain to open</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {openableDomains.map((domain) => (
+                      <button
+                        key={domain}
+                        onClick={() => openBox(domain)}
+                        className="rounded-full border border-zinc-700 bg-zinc-900/40 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
+                      >
+                        {domainLabels[domain]}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setOpenChooser(false)}
+                      className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-400"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="relative mt-6 flex items-center justify-center">
+                <div className="relative h-44 w-52">
+                  <div
+                    className={cx(
+                      "absolute inset-x-0 top-8 mx-auto h-24 w-52 rounded-3xl border border-zinc-700/60 bg-zinc-950/60 shadow-[0_0_30px_rgba(34,211,238,0.1)] transition-transform duration-500",
+                      boxOpen ? "translate-y-3" : "translate-y-0"
+                    )}
+                  >
+                    <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_30%_20%,rgba(34,211,238,0.2),transparent_55%),radial-gradient(circle_at_70%_30%,rgba(232,121,249,0.2),transparent_60%)]" />
+                  </div>
+
+                  <div
+                    className={cx(
+                      "absolute inset-x-4 top-2 h-10 rounded-2xl border border-zinc-700/70 bg-zinc-900/70 transition-transform duration-500 origin-bottom",
+                      boxOpen ? "rotate-[-18deg] -translate-y-3" : "rotate-0"
+                    )}
                   />
-                  <label htmlFor="addAsActive" className="text-xs text-zinc-300">
-                    Add as Active (uses a slot)
-                  </label>
-                </div>
 
-                {!canAddToActive && <span className="text-[11px] text-zinc-500">Active full</span>}
+                  {boxDrop && (
+                    <div className="absolute left-1/2 top-0 h-4 w-4 -translate-x-1/2 rounded-full bg-cyan-200/70 blur-[1px] animate-bounce" />
+                  )}
+
+                  <div className="absolute inset-0 rounded-[36px] border border-cyan-300/10 opacity-60 blur-xl" />
+                </div>
               </div>
 
-              <label className="mt-3 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-300">
-                <input
-                  type="checkbox"
-                  checked={addBetCommitted}
-                  onChange={(e) => setAddBetCommitted(e.target.checked)}
-                  className="h-4 w-4 accent-zinc-100"
-                />
-                I’d bet $100 this ships on time
-              </label>
+              <div className="mt-3 text-center text-xs text-zinc-500">
+                {openableDomains.length === 0
+                  ? "No domains are open with eligible items yet."
+                  : "Open when at least one domain is ready."}
+              </div>
             </div>
 
-            <div className="pt-1">
-              <button
-                onClick={addIdea}
-                disabled={!title.trim()}
-                className="h-12 w-full rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 text-sm font-semibold text-zinc-950 shadow-[0_10px_30px_rgba(34,211,238,0.10)] hover:opacity-95 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {addAsActive && canAddToActive ? "Add to Active" : "Add to Backlog"}
-              </button>
-
-              {addActivationError && (
-                <div className="mt-2 text-xs text-rose-200/80">{addActivationError}</div>
-              )}
-
-              {!canAddToActive && (
-                <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/30 p-3 text-xs text-zinc-400">
-                  Active is full. Add to backlog now, then promote the winner later.
+            <div className="flex-1">
+              <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/30 p-4">
+                <div className="text-sm font-semibold">Capture into the box</div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  Everything goes in. You can’t browse, only reveal when the box opens.
                 </div>
-              )}
+
+                <div className="mt-4">
+                  <label className="text-xs text-zinc-400">What are you throwing in?</label>
+                  <textarea
+                    value={boxContent}
+                    onChange={(e) => setBoxContent(e.target.value)}
+                    placeholder="Raw thought, idea, impulse..."
+                    className="mt-1 h-24 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                    maxLength={240}
+                  />
+                  <div className="mt-1 text-[11px] text-zinc-500">{boxContent.length}/240</div>
+                </div>
+
+                <div className="mt-4">
+                  <label className="text-xs text-zinc-400">Domain</label>
+                  <select
+                    value={boxDomain}
+                    onChange={(e) => setBoxDomain(e.target.value as Domain)}
+                    className="mt-1 h-11 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
+                  >
+                    {domains.map((domain) => (
+                      <option key={domain} value={domain}>
+                        {domainLabels[domain]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={captureToBox}
+                  disabled={!boxContent.trim()}
+                  className="mt-4 h-11 w-full rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 text-sm font-semibold text-zinc-950 shadow-[0_10px_30px_rgba(34,211,238,0.10)] hover:opacity-95 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Throw into Box
+                </button>
+              </div>
             </div>
           </div>
+
+          {revealedItem && revealedDomain && (
+            <div className="mt-6 rounded-2xl border border-zinc-800/70 bg-zinc-950/30 p-4">
+              <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold">The box revealed</div>
+                  <div className="mt-1 text-sm text-zinc-200 whitespace-pre-line">
+                    {revealedItem.content}
+                  </div>
+                  <div className="mt-2 text-xs text-zinc-500">
+                    Domain: <span className="text-zinc-300">{domainLabels[revealedDomain]}</span>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-400">
+                  Return count: {revealedItem.returnCount}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-4 md:grid-cols-3">
+                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                  <div className="text-sm font-semibold">Promote</div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    Title + proof required. Pick your deadline and commit the bet.
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    <input
+                      value={promoteTitle}
+                      onChange={(e) => setPromoteTitle(e.target.value)}
+                      placeholder="Title"
+                      className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                      maxLength={120}
+                    />
+                    <input
+                      value={promoteProofDefinition}
+                      onChange={(e) => setPromoteProofDefinition(e.target.value)}
+                      placeholder="Proof definition (required)"
+                      className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                    />
+                    <label className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={promoteBetCommitted}
+                        onChange={(e) => setPromoteBetCommitted(e.target.checked)}
+                        className="h-4 w-4 accent-zinc-100"
+                      />
+                      I’d bet $100 this ships on time
+                    </label>
+                    <div>
+                      <label className="text-[11px] text-zinc-500">Deadline (days)</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={promoteDays === 0 ? "" : String(promoteDays)}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/\D/g, "");
+                          if (val === "") {
+                            setPromoteDays(0);
+                            return;
+                          }
+                          setPromoteDays(clamp(Number(val), 1, 90));
+                        }}
+                        onBlur={() => {
+                          if (!promoteDays || promoteDays < 1) {
+                            setPromoteDays(defaultDaysByDomain[revealedDomain]);
+                          }
+                        }}
+                        className="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => revealedItem && promoteBoxItem(revealedItem)}
+                    className="mt-3 w-full rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-3 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95"
+                  >
+                    Promote to Active
+                  </button>
+
+                  {promoteError && (
+                    <div className="mt-2 text-xs text-rose-200/80">{promoteError}</div>
+                  )}
+
+                  {!canAddToActive && (
+                    <div className="mt-2 text-[11px] text-zinc-500">Active list full.</div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                  <div className="text-sm font-semibold">Return</div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    Toss it back with a micro-reason. It’ll cool down before resurfacing.
+                  </div>
+
+                  <input
+                    value={returnReason}
+                    onChange={(e) => setReturnReason(e.target.value.slice(0, 15))}
+                    placeholder="Reason (≤15 chars)"
+                    className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                    maxLength={15}
+                  />
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    {returnReason.length}/15
+                  </div>
+
+                  <button
+                    onClick={handleReturn}
+                    className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/40"
+                  >
+                    Return to Box
+                  </button>
+
+                  {returnError && <div className="mt-2 text-xs text-rose-200/80">{returnError}</div>}
+                </div>
+
+                <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                  <div className="text-sm font-semibold">Kill</div>
+                  <div className="mt-1 text-xs text-zinc-500">Cut it now. No graveyard for box items.</div>
+
+                  <select
+                    value={boxKillReason}
+                    onChange={(e) => setBoxKillReason(e.target.value as KillReasonCode)}
+                    className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
+                  >
+                    <option value="">Select a reason</option>
+                    {boxKillReasons.map((reason) => (
+                      <option key={reason.code} value={reason.code}>
+                        {reason.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  <textarea
+                    value={boxKillDetail}
+                    onChange={(e) => setBoxKillDetail(e.target.value)}
+                    placeholder="Optional detail"
+                    className="mt-2 h-20 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                    rows={3}
+                  />
+
+                  <button
+                    onClick={handleKill}
+                    disabled={!boxKillReason}
+                    className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Kill it
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Active */}
@@ -861,7 +1439,7 @@ useEffect(() => {
           </div>
 
           {activeIdeas.length === 0 ? (
-            <EmptyCard text="No active ideas. Promote something from backlog or add as active." />
+            <EmptyCard text="No active ideas. Promote something from the box." />
           ) : (
             <div className="grid gap-3">
               {activeIdeas.map((idea) => {
@@ -874,12 +1452,13 @@ useEffect(() => {
                     key={idea.id}
                     onClick={() => setSelectedId(idea.id)}
                     className={cx(
-  "w-full rounded-2xl border p-4 text-left transition",
-  "bg-zinc-950/30 hover:bg-zinc-950/40",
-  selectedId === idea.id && "border-cyan-400/40 bg-zinc-950/50",
-  expired ? "border-rose-500/30 shadow-[0_0_40px_rgba(244,63,94,0.06)]" : "border-zinc-800/70"
-)}
-
+                      "w-full rounded-2xl border p-4 text-left transition",
+                      "bg-zinc-950/30 hover:bg-zinc-950/40",
+                      selectedId === idea.id && "border-cyan-400/40 bg-zinc-950/50",
+                      expired
+                        ? "border-rose-500/30 shadow-[0_0_40px_rgba(244,63,94,0.06)]"
+                        : "border-zinc-800/70"
+                    )}
                   >
                     <div className="flex flex-col gap-2">
                       <div className="flex items-start justify-between gap-3">
@@ -913,18 +1492,17 @@ useEffect(() => {
                       </div>
 
                       {idea.proofDefinition.trim() && (
-  <div className="text-xs text-zinc-500">
-    Success:{" "}
-    <span className="text-zinc-300 line-clamp-1">
-      {idea.proofDefinition}
-    </span>
-  </div>
-)}
-
+                        <div className="text-xs text-zinc-500">
+                          Success:{" "}
+                          <span className="text-zinc-300 line-clamp-1">
+                            {idea.proofDefinition}
+                          </span>
+                        </div>
+                      )}
 
                       {expired && (
                         <div className="text-xs text-rose-200/80">
-                          Time’s up. Open this and ship proof or kill it.
+                          Time’s up. It will return to the box for a new decision.
                         </div>
                       )}
                     </div>
@@ -935,109 +1513,15 @@ useEffect(() => {
           )}
         </section>
 
-        {/* Backlog (collapsed by default) */}
-        <section className="relative mt-6 rounded-2xl border border-zinc-800/70 bg-zinc-900/15 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-fuchsia-400/25 to-transparent" />
-
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">
-                Backlog{" "}
-                <span className="ml-2 rounded-full border border-zinc-800 bg-zinc-950/30 px-2 py-0.5 text-xs text-zinc-300">
-                  {backlogIdeas.length}
-                </span>
-              </h2>
-              <p className="mt-1 text-xs text-zinc-500">Capture freely. Promote only the winners.</p>
-            </div>
-
-            <button
-              onClick={() => setBacklogOpen((v) => !v)}
-              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
-            >
-              {backlogOpen ? "Hide" : "Show"}
-            </button>
-          </div>
-
-          {backlogOpen && (
-            <div className="mt-4">
-              {backlogIdeas.length === 0 ? (
-                <EmptyCard text="No backlog ideas yet. Dump ideas here freely, then promote the winners." />
-              ) : (
-                <div className="grid gap-3">
-                  {backlogIdeas.map((idea) => (
-                    <div
-                      key={idea.id}
-                      className="rounded-2xl border border-zinc-800/70 bg-zinc-950/30 p-4 transition hover:bg-zinc-950/40"
-                    >
-                      <div className="flex flex-col gap-3">
-                        <div>
-                          <div className="text-sm font-medium">{idea.title}</div>
-                          <div className="mt-1 text-xs text-zinc-500">
-                            Captured {fmtDate(idea.createdAt)} · Default deadline {fmtDate(idea.deadlineAt)} · Proof{" "}
-                            <span className="text-zinc-300">{idea.proofType}</span>
-                          </div>
-                          {idea.proofDefinition.trim() && (
-  <div className="mt-2 text-xs text-zinc-500">
-    Success:{" "}
-    <span className="text-zinc-300 line-clamp-1">
-      {idea.proofDefinition}
-    </span>
-  </div>
-)}
-
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => setSelectedId(idea.id)}
-                            className="rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
-                          >
-                            Details
-                          </button>
-
-                          <button
-                            onClick={() => promoteToActive(idea.id)}
-                            disabled={!canAddToActive}
-                            className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-3 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            Promote to Active
-                          </button>
-
-                          <button
-                            onClick={() => deleteIdea(idea.id)}
-                            className="rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
-                          >
-                            Delete
-                          </button>
-
-                          {!canAddToActive && (
-                            <span className="self-center text-[11px] text-zinc-500">Active full</span>
-                          )}
-                        </div>
-
-                        {promoteActivationError?.id === idea.id && (
-                          <div className="text-xs text-rose-200/80">{promoteActivationError.message}</div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-
         {/* Detail panel */}
-       {selectedIdea && (
-  <section
-  ref={decisionRef}
-  className={cx(
-    "relative mt-8 rounded-2xl border border-zinc-800/70 bg-zinc-900/20 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur transition",
-    decisionFlash && "ring-1 ring-cyan-400/40 shadow-[0_0_60px_rgba(34,211,238,0.08)]"
-  )}
->
-
-
+        {selectedIdea && (
+          <section
+            ref={decisionRef}
+            className={cx(
+              "relative mt-8 rounded-2xl border border-zinc-800/70 bg-zinc-900/20 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur transition",
+              decisionFlash && "ring-1 ring-cyan-400/40 shadow-[0_0_60px_rgba(34,211,238,0.08)]"
+            )}
+          >
             <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-lime-300/20 to-transparent" />
 
             <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
@@ -1198,54 +1682,12 @@ useEffect(() => {
                       placeholder="Freeform notes (editable after resolution)"
                     />
                   </div>
-
-                  <div className="md:col-span-2">
-                    <label className="text-xs text-zinc-400">Status</label>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {(["backlog", "active"] as const).map((s) => {
-                        const disabled =
-                          isSelectedResolved ||
-                          (s === "active" && selectedIdea.status !== "active" && !canAddToActive);
-
-                        return (
-                          <button
-                            key={s}
-                            onClick={() => !disabled && setEditStatus(s)}
-                            className={cx(
-                              "rounded-xl border px-3 py-2 text-xs",
-                              editStatus === s
-                                ? "border-zinc-600 bg-zinc-900/40 text-zinc-100"
-                                : "border-zinc-800 bg-zinc-950/30 text-zinc-300 hover:bg-zinc-900/30",
-                              disabled && "cursor-not-allowed opacity-40"
-                            )}
-                          >
-                            {s === "backlog" ? "Backlog" : "Active"}
-                          </button>
-                        );
-                      })}
-
-                      {selectedIdea.status !== "active" && !canAddToActive && (
-                        <span className="self-center text-[11px] text-zinc-500">
-                          Active full (ship/kill to free a slot)
-                        </span>
-                      )}
-                    </div>
-                    {editActivationError && (
-                      <div className="mt-2 text-xs text-rose-200/80">{editActivationError}</div>
-                    )}
-                  </div>
                 </div>
 
                 <div className="mt-4 flex gap-2">
                   <button
                     onClick={updateIdea}
-                    disabled={
-                      (!isSelectedResolved && !editTitle.trim()) ||
-                      (!isSelectedResolved &&
-                        editStatus === "active" &&
-                        selectedIdea.status !== "active" &&
-                        !canAddToActive)
-                    }
+                    disabled={!isSelectedResolved && !editTitle.trim()}
                     className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-sm font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Save changes
@@ -1344,6 +1786,137 @@ useEffect(() => {
           <SupportBuild href={SUPPORT_URL} projectName="Kill Your Darlings" />
         </footer>
       </div>
+
+      {earlyUnlockDomain && (
+        <Modal onClose={() => setEarlyUnlockDomain(null)}>
+          <div className="text-sm font-semibold">Early unlock {domainLabels[earlyUnlockDomain]}</div>
+          <div className="mt-1 text-xs text-zinc-500">
+            Enter a short reason (≤30 chars). This applies debt to the next reveal.
+          </div>
+          <input
+            value={earlyUnlockReason}
+            onChange={(e) => setEarlyUnlockReason(e.target.value.slice(0, 30))}
+            placeholder="Reason"
+            className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+            maxLength={30}
+          />
+          <div className="mt-1 text-[11px] text-zinc-500">{earlyUnlockReason.length}/30</div>
+          <div className="mt-4 flex gap-2">
+            <button
+              onClick={handleEarlyUnlock}
+              disabled={!earlyUnlockReason.trim()}
+              className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Unlock
+            </button>
+            <button
+              onClick={() => setEarlyUnlockDomain(null)}
+              className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+            >
+              Cancel
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {accountabilityItemId && (
+        <Modal onClose={() => {}}>
+          <div className="text-sm font-semibold">You unlocked early.</div>
+          <div className="mt-1 text-xs text-zinc-500">Did you act on what you took?</div>
+
+          {accountabilityMode === "respond" && (
+            <div className="mt-4 flex gap-2">
+              <button
+                onClick={handleAccountabilityYes}
+                className="rounded-xl bg-gradient-to-r from-lime-200 to-cyan-200 px-4 py-2 text-xs font-semibold text-zinc-950"
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => setAccountabilityMode("return")}
+                className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+              >
+                No — return
+              </button>
+              <button
+                onClick={() => setAccountabilityMode("kill")}
+                className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+              >
+                No — kill
+              </button>
+            </div>
+          )}
+
+          {accountabilityMode === "return" && (
+            <div className="mt-4">
+              <input
+                value={accountabilityReturnReason}
+                onChange={(e) => setAccountabilityReturnReason(e.target.value.slice(0, 15))}
+                placeholder="Return reason (≤15 chars)"
+                className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none"
+                maxLength={15}
+              />
+              <div className="mt-1 text-[11px] text-zinc-500">
+                {accountabilityReturnReason.length}/15
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={handleAccountabilityReturn}
+                  disabled={!accountabilityReturnReason.trim()}
+                  className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Return item
+                </button>
+                <button
+                  onClick={() => setAccountabilityMode("respond")}
+                  className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+                >
+                  Back
+                </button>
+              </div>
+            </div>
+          )}
+
+          {accountabilityMode === "kill" && (
+            <div className="mt-4">
+              <select
+                value={accountabilityKillReason}
+                onChange={(e) => setAccountabilityKillReason(e.target.value as KillReasonCode)}
+                className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none"
+              >
+                <option value="">Select a reason</option>
+                {boxKillReasons.map((reason) => (
+                  <option key={reason.code} value={reason.code}>
+                    {reason.label}
+                  </option>
+                ))}
+              </select>
+              <textarea
+                value={accountabilityKillDetail}
+                onChange={(e) => setAccountabilityKillDetail(e.target.value)}
+                placeholder="Optional detail"
+                className="mt-2 h-20 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs outline-none"
+                rows={3}
+              />
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={handleAccountabilityKill}
+                  disabled={!accountabilityKillReason}
+                  className="rounded-xl bg-gradient-to-r from-rose-300 to-amber-200 px-4 py-2 text-xs font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Kill item
+                </button>
+                <button
+                  onClick={() => setAccountabilityMode("respond")}
+                  className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+                >
+                  Back
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
     </main>
   );
 }
@@ -1398,6 +1971,22 @@ function EmptyCard({ text }: { text: string }) {
   return (
     <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/20 p-6 text-sm text-zinc-400">
       {text}
+    </div>
+  );
+}
+
+function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="relative w-full max-w-md rounded-2xl border border-zinc-800/80 bg-zinc-950/90 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]">
+        <button
+          onClick={onClose}
+          className="absolute right-3 top-3 text-xs text-zinc-500 hover:text-zinc-200"
+        >
+          Close
+        </button>
+        {children}
+      </div>
     </div>
   );
 }
