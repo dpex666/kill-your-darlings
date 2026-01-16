@@ -1785,7 +1785,8 @@ export default function Page() {
       </div>
 
       {revealedItem && revealedDomain && (!boxCinematic || boxStage === "lidOff") && (
-        <Modal onClose={() => {}} showClose={false} className="max-w-5xl">
+        <Modal onClose={() => {}} showClose={false} size="2xl">
+
           <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
             <div>
               <div className="text-sm font-semibold">The box revealed</div>
@@ -2143,17 +2144,29 @@ function Modal({
   onClose,
   showClose = true,
   className,
+  size = "md",
 }: {
   children: React.ReactNode;
   onClose: () => void;
   showClose?: boolean;
   className?: string;
+  size?: "md" | "lg" | "xl" | "2xl";
 }) {
+  const sizeClass =
+    size === "md"
+      ? "max-w-md"
+      : size === "lg"
+      ? "max-w-2xl"
+      : size === "xl"
+      ? "max-w-4xl"
+      : "max-w-6xl";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
       <div
         className={cx(
-          "relative w-full max-w-md rounded-2xl border border-zinc-800/80 bg-zinc-950/90 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]",
+          "relative w-full rounded-2xl border border-zinc-800/80 bg-zinc-950/90 p-5 shadow-[0_0_40px_rgba(0,0,0,0.5)]",
+          sizeClass,
           className
         )}
       >
@@ -2170,6 +2183,7 @@ function Modal({
     </div>
   );
 }
+
 
 function DecisionActions({
   idea,
