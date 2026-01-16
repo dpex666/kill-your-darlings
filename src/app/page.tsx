@@ -254,12 +254,12 @@ function migrateStateV2(data: AppStateV2): AppState {
 }
 
 function loadState(): AppState {
-  if (typeof window === "undefined") {
+  if (typeof globalThis === "undefined") {
     return defaultState();
   }
 
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = globalThis.localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as AppState;
       if (
@@ -279,7 +279,7 @@ function loadState(): AppState {
       }
     }
 
-    const legacyRaw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+    const legacyRaw = globalThis.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (legacyRaw) {
       const legacyParsed = JSON.parse(legacyRaw) as AppStateV2;
       if (legacyParsed && legacyParsed.version === 2 && Array.isArray(legacyParsed.ideas)) {
@@ -287,7 +287,7 @@ function loadState(): AppState {
       }
     }
 
-    const legacyRawV1 = window.localStorage.getItem(LEGACY_STORAGE_KEY_V1);
+    const legacyRawV1 = globalThis.localStorage.getItem(LEGACY_STORAGE_KEY_V1);
     if (legacyRawV1) {
       const legacyParsed = JSON.parse(legacyRawV1) as AppStateV1;
       if (legacyParsed && legacyParsed.version === 1 && Array.isArray(legacyParsed.ideas)) {
@@ -303,7 +303,7 @@ function loadState(): AppState {
 
 function saveState(state: AppState) {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    globalThis.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
     // ignore
   }
@@ -345,7 +345,7 @@ function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-function pickDomainForExpired(title: string) {
+function pickDomainForExpired(title: string): Domain {
   const lowered = title.toLowerCase();
   const keywords = ["mvp", "ship", "launch", "release", "deploy", "scale", "growth"];
   const isBusiness = keywords.some((keyword) => lowered.includes(keyword));
@@ -460,8 +460,8 @@ export default function Page() {
 
   // Tick for countdowns
   useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
+    const t = globalThis.setInterval(() => setNow(Date.now()), 1000);
+    return () => globalThis.clearInterval(t);
   }, []);
 
   // Expiry flow: move expired actives back into the box
@@ -476,7 +476,7 @@ export default function Page() {
       );
       if (expiredIdeas.length === 0) return prev;
 
-      const nextBoxItems = expiredIdeas.map((idea) => {
+      const nextBoxItems: BoxItem[] = expiredIdeas.map((idea) => {
         const proofLine = idea.proofDefinition.trim()
           ? `\nSuccess: ${idea.proofDefinition.trim()}`
           : "";
@@ -668,12 +668,12 @@ export default function Page() {
 
   function animateBoxOpen() {
     setBoxOpen(true);
-    window.setTimeout(() => setBoxOpen(false), 800);
+    globalThis.setTimeout(() => setBoxOpen(false), 800);
   }
 
   function animateBoxDrop() {
     setBoxDrop(true);
-    window.setTimeout(() => setBoxDrop(false), 700);
+    globalThis.setTimeout(() => setBoxDrop(false), 700);
   }
 
   function captureToBox() {
@@ -1197,30 +1197,112 @@ export default function Page() {
               )}
 
               <div className="relative mt-6 flex items-center justify-center">
-                <div className="relative h-44 w-52">
-                  <div
-                    className={cx(
-                      "absolute inset-x-0 top-8 mx-auto h-24 w-52 rounded-3xl border border-zinc-700/60 bg-zinc-950/60 shadow-[0_0_30px_rgba(34,211,238,0.1)] transition-transform duration-500",
-                      boxOpen ? "translate-y-3" : "translate-y-0"
-                    )}
-                  >
-                    <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_30%_20%,rgba(34,211,238,0.2),transparent_55%),radial-gradient(circle_at_70%_30%,rgba(232,121,249,0.2),transparent_60%)]" />
-                  </div>
+  <div className="relative h-52 w-56">
+    {/* soft floor shadow */}
+    <div className="absolute inset-x-10 bottom-6 h-8 rounded-full bg-black/40 blur-xl" />
 
-                  <div
-                    className={cx(
-                      "absolute inset-x-4 top-2 h-10 rounded-2xl border border-zinc-700/70 bg-zinc-900/70 transition-transform duration-500 origin-bottom",
-                      boxOpen ? "rotate-[-18deg] -translate-y-3" : "rotate-0"
-                    )}
-                  />
+    {/* gift base */}
+    <div
+      className={cx(
+        "absolute left-1/2 top-16 h-28 w-48 -translate-x-1/2 rounded-3xl",
+        "border border-zinc-700/60 bg-zinc-950/60 backdrop-blur",
+        "shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_18px_60px_rgba(34,211,238,0.08)]",
+        "transition-transform duration-500",
+        boxOpen ? "translate-y-2" : "translate-y-0"
+      )}
+    >
+      {/* base sheen */}
+      <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_25%_25%,rgba(34,211,238,0.18),transparent_55%),radial-gradient(circle_at_80%_30%,rgba(232,121,249,0.18),transparent_60%),linear-gradient(to_bottom,rgba(255,255,255,0.06),transparent_35%)]" />
 
-                  {boxDrop && (
-                    <div className="absolute left-1/2 top-0 h-4 w-4 -translate-x-1/2 rounded-full bg-cyan-200/70 blur-[1px] animate-bounce" />
-                  )}
+      {/* ribbon vertical */}
+      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl bg-gradient-to-b from-fuchsia-200/55 via-cyan-200/55 to-fuchsia-200/45 opacity-80" />
+      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
 
-                  <div className="absolute inset-0 rounded-[36px] border border-cyan-300/10 opacity-60 blur-xl" />
-                </div>
-              </div>
+      {/* ribbon horizontal */}
+      <div className="absolute left-0 top-1/2 h-10 w-full -translate-y-1/2 rounded-2xl bg-gradient-to-r from-fuchsia-200/45 via-cyan-200/55 to-fuchsia-200/45 opacity-80" />
+      <div className="absolute left-0 top-1/2 h-10 w-full -translate-y-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
+
+      {/* little highlight edge */}
+      <div className="pointer-events-none absolute inset-x-6 top-2 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+    </div>
+
+    {/* lid */}
+    <div
+      className={cx(
+        "absolute left-1/2 top-10 h-14 w-52 -translate-x-1/2 rounded-3xl",
+        "border border-zinc-700/70 bg-zinc-900/70 backdrop-blur",
+        "shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_12px_40px_rgba(232,121,249,0.08)]",
+        "transition-transform duration-500 origin-bottom",
+        boxOpen ? "-translate-y-6 rotate-[-14deg]" : "translate-y-0 rotate-0"
+      )}
+    >
+      {/* lid sheen */}
+      <div className="absolute inset-0 rounded-3xl bg-[radial-gradient(circle_at_25%_30%,rgba(34,211,238,0.14),transparent_60%),radial-gradient(circle_at_80%_35%,rgba(232,121,249,0.14),transparent_65%),linear-gradient(to_bottom,rgba(255,255,255,0.07),transparent_40%)]" />
+
+      {/* ribbon on lid */}
+      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl bg-gradient-to-b from-fuchsia-200/55 via-cyan-200/55 to-fuchsia-200/45 opacity-85" />
+      <div className="absolute left-1/2 top-0 h-full w-10 -translate-x-1/2 rounded-2xl shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]" />
+    </div>
+
+    {/* bow */}
+    <div
+      className={cx(
+        "absolute left-1/2 top-7 -translate-x-1/2",
+        "transition-transform duration-500",
+        boxOpen ? "-translate-y-7 rotate-[-8deg]" : "translate-y-0 rotate-0"
+      )}
+    >
+      <div className="relative h-12 w-28">
+        {/* knot */}
+        <div className="absolute left-1/2 top-5 h-4 w-4 -translate-x-1/2 rounded-full bg-gradient-to-br from-fuchsia-200/70 to-cyan-200/70 shadow-[0_0_0_1px_rgba(255,255,255,0.18)]" />
+
+        {/* left loop */}
+        <div
+          className={cx(
+            "absolute left-2 top-4 h-7 w-12 rounded-full",
+            "bg-gradient-to-br from-fuchsia-200/55 to-cyan-200/55",
+            "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]",
+            boxDrop ? "animate-bounce" : ""
+          )}
+          style={{ transform: "rotate(-18deg)" }}
+        />
+        {/* right loop */}
+        <div
+          className={cx(
+            "absolute right-2 top-4 h-7 w-12 rounded-full",
+            "bg-gradient-to-br from-cyan-200/55 to-fuchsia-200/55",
+            "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.14)]",
+            boxDrop ? "animate-bounce" : ""
+          )}
+          style={{ transform: "rotate(18deg)" }}
+        />
+
+        {/* tails */}
+        <div
+          className="absolute left-10 top-9 h-8 w-3 rounded-full bg-gradient-to-b from-fuchsia-200/55 to-cyan-200/35"
+          style={{ transform: "rotate(18deg)" }}
+        />
+        <div
+          className="absolute right-10 top-9 h-8 w-3 rounded-full bg-gradient-to-b from-cyan-200/55 to-fuchsia-200/35"
+          style={{ transform: "rotate(-18deg)" }}
+        />
+      </div>
+    </div>
+
+    {/* sparkle drop when capturing/opening */}
+    {boxDrop && (
+      <>
+        <div className="absolute left-1/2 top-2 h-2 w-2 -translate-x-1/2 rounded-full bg-cyan-200/80 blur-[0.5px] animate-bounce" />
+        <div className="absolute left-[46%] top-6 h-1.5 w-1.5 rounded-full bg-fuchsia-200/70 blur-[0.5px] animate-bounce" />
+        <div className="absolute left-[54%] top-7 h-1.5 w-1.5 rounded-full bg-lime-200/60 blur-[0.5px] animate-bounce" />
+      </>
+    )}
+
+    {/* outer glow */}
+    <div className="pointer-events-none absolute inset-6 rounded-[32px] border border-cyan-300/10 opacity-70 blur-xl" />
+  </div>
+</div>
+
 
               <div className="mt-3 text-center text-xs text-zinc-500">
                 {openableDomains.length === 0
