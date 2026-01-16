@@ -4,6 +4,15 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type ProofType = "link" | "text";
 type IdeaStatus = "backlog" | "active" | "shipped" | "killed";
+type KillReasonCode =
+  | "TIME_EXPIRED"
+  | "NO_LONGER_RELEVANT"
+  | "TOO_BIG"
+  | "NO_CLEAR_USER_PROBLEM"
+  | "LOST_INTEREST"
+  | "BLOCKED"
+  | "OTHER";
+type ProofAttachmentType = "url" | "github" | "note";
 
 type Idea = {
   id: string;
@@ -12,47 +21,134 @@ type Idea = {
   deadlineAt: number; // ms
   proofType: ProofType;
   status: IdeaStatus;
+  problemStatement: string;
+  audience: string;
+  proofDefinition: string;
+  killTrigger: string;
+  notes: string;
+  betCommitted: boolean;
+  proofs: Array<{
+    id: string;
+    type: ProofAttachmentType;
+    value: string;
+  }>;
 
   // Resolution fields
-  proofValue?: string;
-  killedReason?: string;
+  killReasonCode?: KillReasonCode;
+  killReasonDetail?: string;
   resolvedAt?: number; // ms
 };
 
 type AppState = {
-  version: 1;
+  version: 2;
   ideas: Idea[];
   settings: {
     activeLimit: number;
   };
+  lastActivationWeek: string;
 };
 
-const STORAGE_KEY = "kyd_state_v1";
+type AppStateV1 = {
+  version: 1;
+  ideas: Array<{
+    id: string;
+    title: string;
+    createdAt: number;
+    deadlineAt: number;
+    proofType: ProofType;
+    status: IdeaStatus;
+    proofValue?: string;
+    killedReason?: string;
+    resolvedAt?: number;
+  }>;
+  settings?: {
+    activeLimit?: number;
+  };
+};
+
+const STORAGE_KEY = "kyd_state_v2";
+const LEGACY_STORAGE_KEY = "kyd_state_v1";
 
 // ---------------------------
 // Storage adapter (localStorage)
 // ---------------------------
+function defaultState(): AppState {
+  return { version: 2, ideas: [], settings: { activeLimit: 5 }, lastActivationWeek: "" };
+}
+
+function migrateStateV1(data: AppStateV1): AppState {
+  const ideas: Idea[] = (data.ideas ?? []).map((idea) => {
+    const migratedProofs =
+      idea.proofValue && idea.proofValue.trim()
+        ? [
+            {
+              id: uid(),
+              type: idea.proofType === "link" ? "url" : "note",
+              value: idea.proofValue,
+            },
+          ]
+        : [];
+
+    const killReasonDetail = idea.killedReason?.trim() || "";
+
+    return {
+      id: idea.id,
+      title: idea.title,
+      createdAt: idea.createdAt,
+      deadlineAt: idea.deadlineAt,
+      proofType: idea.proofType,
+      status: idea.status,
+      problemStatement: "",
+      audience: "",
+      proofDefinition: "",
+      killTrigger: "",
+      notes: "",
+      betCommitted: false,
+      proofs: migratedProofs,
+      killReasonCode: idea.status === "killed" ? "OTHER" : undefined,
+      killReasonDetail: idea.status === "killed" ? killReasonDetail : undefined,
+      resolvedAt: idea.resolvedAt,
+    };
+  });
+
+  return {
+    version: 2,
+    ideas,
+    settings: { activeLimit: data.settings?.activeLimit ?? 5 },
+    lastActivationWeek: "",
+  };
+}
+
 function loadState(): AppState {
   if (typeof window === "undefined") {
-    return { version: 1, ideas: [], settings: { activeLimit: 5 } };
+    return defaultState();
   }
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { version: 1, ideas: [], settings: { activeLimit: 5 } };
+    if (!raw) {
+      const legacyRaw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (!legacyRaw) return defaultState();
+      const legacyParsed = JSON.parse(legacyRaw) as AppStateV1;
+      if (!legacyParsed || legacyParsed.version !== 1 || !Array.isArray(legacyParsed.ideas)) {
+        return defaultState();
+      }
+      return migrateStateV1(legacyParsed);
+    }
 
     const parsed = JSON.parse(raw) as AppState;
-    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.ideas)) {
-      return { version: 1, ideas: [], settings: { activeLimit: 5 } };
+    if (!parsed || parsed.version !== 2 || !Array.isArray(parsed.ideas)) {
+      return defaultState();
     }
 
     return {
-      version: 1,
+      version: 2,
       ideas: parsed.ideas,
       settings: parsed.settings ?? { activeLimit: 5 },
+      lastActivationWeek: parsed.lastActivationWeek ?? "",
     };
   } catch {
-    return { version: 1, ideas: [], settings: { activeLimit: 5 } };
+    return defaultState();
   }
 }
 
@@ -96,6 +192,27 @@ function isExpired(idea: Idea, now: number) {
   return idea.status === "active" && now >= idea.deadlineAt;
 }
 
+function yearWeek(date: Date) {
+  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayNr = (target.getDay() + 6) % 7;
+  target.setDate(target.getDate() - dayNr + 3);
+  const firstThursday = new Date(target.getFullYear(), 0, 4);
+  const firstDayNr = (firstThursday.getDay() + 6) % 7;
+  firstThursday.setDate(firstThursday.getDate() - firstDayNr + 3);
+  const week = 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  return `${target.getFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+const killReasonLabels: Record<KillReasonCode, string> = {
+  TIME_EXPIRED: "Time expired",
+  NO_LONGER_RELEVANT: "No longer relevant",
+  TOO_BIG: "Too big",
+  NO_CLEAR_USER_PROBLEM: "No clear user problem",
+  LOST_INTEREST: "Lost interest",
+  BLOCKED: "Blocked",
+  OTHER: "Other",
+};
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
@@ -109,9 +226,10 @@ function cx(...classes: Array<string | false | null | undefined>) {
 // ---------------------------
 export default function Page() {
   const [state, setState] = useState<AppState>(() => ({
-    version: 1,
+    version: 2,
     ideas: [],
     settings: { activeLimit: 5 },
+    lastActivationWeek: "",
   }));
 
   const [hydrated, setHydrated] = useState(false);
@@ -123,6 +241,13 @@ export default function Page() {
   const [editDays, setEditDays] = useState<number>(14);
   const [editProofType, setEditProofType] = useState<ProofType>("link");
   const [editStatus, setEditStatus] = useState<"backlog" | "active">("backlog");
+  const [editProblemStatement, setEditProblemStatement] = useState("");
+  const [editAudience, setEditAudience] = useState("");
+  const [editProofDefinition, setEditProofDefinition] = useState("");
+  const [editKillTrigger, setEditKillTrigger] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+  const [editBetCommitted, setEditBetCommitted] = useState(false);
+  const [editActivationError, setEditActivationError] = useState("");
 
   // Backlog collapse state
   const [backlogOpen, setBacklogOpen] = useState(false);
@@ -132,6 +257,13 @@ export default function Page() {
   const [days, setDays] = useState<number>(14);
   const [proofType, setProofType] = useState<ProofType>("link");
   const [addAsActive, setAddAsActive] = useState(false);
+  const [addProofDefinition, setAddProofDefinition] = useState("");
+  const [addBetCommitted, setAddBetCommitted] = useState(false);
+  const [addActivationError, setAddActivationError] = useState("");
+  const [promoteActivationError, setPromoteActivationError] = useState<{
+    id: string;
+    message: string;
+  } | null>(null);
 
   // Selection panel
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -139,6 +271,16 @@ export default function Page() {
     () => state.ideas.find((i) => i.id === selectedId) ?? null,
     [selectedId, state.ideas]
   );
+  const isSelectedResolved =
+    selectedIdea?.status === "shipped" || selectedIdea?.status === "killed";
+
+  useEffect(() => {
+    setAddActivationError("");
+  }, [addBetCommitted, addProofDefinition, addAsActive]);
+
+  useEffect(() => {
+    setEditActivationError("");
+  }, [editBetCommitted, editProofDefinition, editStatus]);
 
   // Load on mount
   useEffect(() => {
@@ -158,6 +300,30 @@ export default function Page() {
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const expiredIds = state.ideas.filter((idea) => isExpired(idea, now));
+    if (expiredIds.length === 0) return;
+
+    setState((prev) => {
+      let changed = false;
+      const ideas = prev.ideas.map((idea) => {
+        if (idea.status === "active" && now >= idea.deadlineAt) {
+          changed = true;
+          return {
+            ...idea,
+            status: "killed",
+            resolvedAt: now,
+            killReasonCode: "TIME_EXPIRED",
+            killReasonDetail: "",
+          };
+        }
+        return idea;
+      });
+      return changed ? { ...prev, ideas } : prev;
+    });
+  }, [hydrated, now, state.ideas]);
 
   const activeIdeas = useMemo(
     () =>
@@ -198,6 +364,28 @@ export default function Page() {
     [activeIdeas, now]
   );
 
+  const shippedThisMonth = useMemo(() => {
+    const start = new Date(now);
+    start.setDate(1);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + 1);
+    return shippedIdeas.filter(
+      (idea) => idea.resolvedAt && idea.resolvedAt >= start.getTime() && idea.resolvedAt < end.getTime()
+    ).length;
+  }, [now, shippedIdeas]);
+
+  const killedThisMonth = useMemo(() => {
+    const start = new Date(now);
+    start.setDate(1);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + 1);
+    return killedIdeas.filter(
+      (idea) => idea.resolvedAt && idea.resolvedAt >= start.getTime() && idea.resolvedAt < end.getTime()
+    ).length;
+  }, [now, killedIdeas]);
+
   const stats = useMemo(
     () => ({
       backlog: backlogIdeas.length,
@@ -205,6 +393,8 @@ export default function Page() {
       shipped: shippedIdeas.length,
       killed: killedIdeas.length,
       expired: expiredCount,
+      shippedThisMonth,
+      killedThisMonth,
     }),
     [
       backlogIdeas.length,
@@ -212,6 +402,8 @@ export default function Page() {
       shippedIdeas.length,
       killedIdeas.length,
       expiredCount,
+      shippedThisMonth,
+      killedThisMonth,
       state.settings.activeLimit,
     ]
   );
@@ -223,6 +415,13 @@ export default function Page() {
     setEditTitle(selectedIdea.title);
     setEditProofType(selectedIdea.proofType);
     setEditStatus(selectedIdea.status === "active" ? "active" : "backlog");
+    setEditProblemStatement(selectedIdea.problemStatement);
+    setEditAudience(selectedIdea.audience);
+    setEditProofDefinition(selectedIdea.proofDefinition);
+    setEditKillTrigger(selectedIdea.killTrigger);
+    setEditNotes(selectedIdea.notes);
+    setEditBetCommitted(selectedIdea.betCommitted);
+    setEditActivationError("");
 
     const remainingDays = Math.ceil(
       (selectedIdea.deadlineAt - Date.now()) / (24 * 60 * 60 * 1000)
@@ -230,8 +429,29 @@ export default function Page() {
     setEditDays(clamp(isFinite(remainingDays) ? remainingDays : 14, 1, 90));
   }, [selectedIdea?.id]);
 
+  function activationBlockMessage(betCommitted: boolean, proofDefinition: string) {
+    if (!betCommitted) return "Confirm the $100 bet to activate.";
+    if (!proofDefinition.trim()) return "Define your proof before activating.";
+
+    const thisWeek = yearWeek(new Date(now));
+    if (state.lastActivationWeek === thisWeek) {
+      return "Weekly activation limit reached. Try again next week.";
+    }
+
+    return "";
+  }
+
   function updateIdea() {
     if (!selectedIdea) return;
+
+    if (isSelectedResolved) {
+      setState((prev) => ({
+        ...prev,
+        ideas: prev.ideas.map((i) => (i.id === selectedIdea.id ? { ...i, notes: editNotes } : i)),
+      }));
+      setEditing(false);
+      return;
+    }
 
     const t = editTitle.trim();
     if (!t) return;
@@ -239,12 +459,20 @@ export default function Page() {
     const movingToActive =
       editStatus === "active" && selectedIdea.status !== "active";
     if (movingToActive && !canAddToActive) return;
+    if (movingToActive) {
+      const gateMessage = activationBlockMessage(editBetCommitted, editProofDefinition);
+      if (gateMessage) {
+        setEditActivationError(gateMessage);
+        return;
+      }
+    }
 
     const useDays = clamp(editDays || 14, 1, 90);
     const newDeadlineAt = Date.now() + useDays * 24 * 60 * 60 * 1000;
 
     setState((prev) => ({
       ...prev,
+      lastActivationWeek: movingToActive ? yearWeek(new Date(now)) : prev.lastActivationWeek,
       ideas: prev.ideas.map((i) =>
         i.id === selectedIdea.id
           ? {
@@ -253,12 +481,19 @@ export default function Page() {
               proofType: editProofType,
               status: editStatus,
               deadlineAt: newDeadlineAt,
+              problemStatement: editProblemStatement,
+              audience: editAudience,
+              proofDefinition: editProofDefinition,
+              killTrigger: editKillTrigger,
+              notes: editNotes,
+              betCommitted: editBetCommitted,
             }
           : i
       ),
     }));
 
     setEditing(false);
+    setEditActivationError("");
 
     if (editStatus === "active") setBacklogOpen(false);
     if (editStatus === "backlog") setSelectedId(null);
@@ -273,6 +508,13 @@ export default function Page() {
     const deadlineAt = createdAt + useDays * 24 * 60 * 60 * 1000;
 
     const wantActive = addAsActive && canAddToActive;
+    if (wantActive) {
+      const gateMessage = activationBlockMessage(addBetCommitted, addProofDefinition);
+      if (gateMessage) {
+        setAddActivationError(gateMessage);
+        return;
+      }
+    }
 
     const newIdea: Idea = {
       id: uid(),
@@ -281,15 +523,26 @@ export default function Page() {
       deadlineAt,
       proofType,
       status: wantActive ? "active" : "backlog",
+      problemStatement: "",
+      audience: "",
+      proofDefinition: addProofDefinition.trim(),
+      killTrigger: "",
+      notes: "",
+      betCommitted: addBetCommitted,
+      proofs: [],
     };
 
     setState((prev) => ({
       ...prev,
+      lastActivationWeek: wantActive ? yearWeek(new Date(now)) : prev.lastActivationWeek,
       ideas: [newIdea, ...prev.ideas],
     }));
 
     setTitle("");
     setAddAsActive(false);
+    setAddProofDefinition("");
+    setAddBetCommitted(false);
+    setAddActivationError("");
 
     if (newIdea.status === "active") {
       setSelectedId(newIdea.id);
@@ -299,40 +552,62 @@ export default function Page() {
   function promoteToActive(id: string) {
     if (!canAddToActive) return;
 
+    const target = state.ideas.find((idea) => idea.id === id);
+    if (!target) return;
+
+    const gateMessage = activationBlockMessage(target.betCommitted, target.proofDefinition);
+    if (gateMessage) {
+      setPromoteActivationError({ id, message: gateMessage });
+      return;
+    }
+
     setState((prev) => ({
       ...prev,
+      lastActivationWeek: yearWeek(new Date(now)),
       ideas: prev.ideas.map((i) =>
         i.id === id && i.status === "backlog" ? { ...i, status: "active" } : i
       ),
     }));
+    setPromoteActivationError(null);
 
     setBacklogOpen(false);
   }
 
-  function shipIdea(id: string, proofValue: string) {
-    const val = proofValue.trim();
-    if (!val) return;
+  function shipIdea(id: string, proofs: Idea["proofs"]) {
+    if (!proofs.length || proofs.some((proof) => !proof.value.trim())) return;
+    const target = state.ideas.find((idea) => idea.id === id);
+    if (!target || !target.proofDefinition.trim()) return;
 
     setState((prev) => ({
       ...prev,
       ideas: prev.ideas.map((i) =>
         i.id === id
-          ? { ...i, status: "shipped", proofValue: val, resolvedAt: Date.now() }
+          ? {
+              ...i,
+              status: "shipped",
+              proofs,
+              resolvedAt: Date.now(),
+            }
           : i
       ),
     }));
     setSelectedId(null);
   }
 
-  function killIdea(id: string, reason: string) {
-    const r = reason.trim();
-    if (!r) return;
+  function killIdea(id: string, code: KillReasonCode, detail: string) {
+    if (!code) return;
 
     setState((prev) => ({
       ...prev,
       ideas: prev.ideas.map((i) =>
         i.id === id
-          ? { ...i, status: "killed", killedReason: r, resolvedAt: Date.now() }
+          ? {
+              ...i,
+              status: "killed",
+              killReasonCode: code,
+              killReasonDetail: detail.trim(),
+              resolvedAt: Date.now(),
+            }
           : i
       ),
     }));
@@ -348,7 +623,7 @@ export default function Page() {
   }
 
   function resetAll() {
-    setState({ version: 1, ideas: [], settings: { activeLimit: 5 } });
+    setState({ version: 2, ideas: [], settings: { activeLimit: 5 }, lastActivationWeek: "" });
     setSelectedId(null);
     setBacklogOpen(false);
     setEditing(false);
@@ -414,11 +689,13 @@ export default function Page() {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-7">
             <StatChip label="Backlog" value={stats.backlog} tone="backlog" />
             <StatChip label="Active" value={stats.active} tone="active" />
             <StatChip label="Shipped" value={stats.shipped} tone="shipped" />
+            <StatChip label="Shipped (mo)" value={stats.shippedThisMonth} tone="shipped" />
             <StatChip label="Killed" value={stats.killed} tone="killed" />
+            <StatChip label="Killed (mo)" value={stats.killedThisMonth} tone="killed" />
             <StatChip
               label="Expired"
               value={stats.expired}
@@ -481,6 +758,19 @@ export default function Page() {
                 <option value="text">Text</option>
               </select>
 
+              <div className="mt-3">
+                <label className="text-xs text-zinc-400">Proof definition</label>
+                <input
+                  value={addProofDefinition}
+                  onChange={(e) => setAddProofDefinition(e.target.value)}
+                  placeholder="What counts as success?"
+                  className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                />
+                <div className="mt-1 text-[11px] text-zinc-500">
+                  Required before activating. Keep it measurable.
+                </div>
+              </div>
+
               <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2">
                 <div className="flex items-center gap-2">
                   <input
@@ -498,6 +788,16 @@ export default function Page() {
 
                 {!canAddToActive && <span className="text-[11px] text-zinc-500">Active full</span>}
               </div>
+
+              <label className="mt-3 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={addBetCommitted}
+                  onChange={(e) => setAddBetCommitted(e.target.checked)}
+                  className="h-4 w-4 accent-zinc-100"
+                />
+                I’d bet $100 this ships on time
+              </label>
             </div>
 
             <div className="pt-1">
@@ -508,6 +808,10 @@ export default function Page() {
               >
                 {addAsActive && canAddToActive ? "Add to Active" : "Add to Backlog"}
               </button>
+
+              {addActivationError && (
+                <div className="mt-2 text-xs text-rose-200/80">{addActivationError}</div>
+              )}
 
               {!canAddToActive && (
                 <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/30 p-3 text-xs text-zinc-400">
@@ -637,6 +941,13 @@ export default function Page() {
 
                         <div className="flex flex-wrap gap-2">
                           <button
+                            onClick={() => setSelectedId(idea.id)}
+                            className="rounded-xl border border-zinc-800 bg-transparent px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
+                          >
+                            Details
+                          </button>
+
+                          <button
                             onClick={() => promoteToActive(idea.id)}
                             disabled={!canAddToActive}
                             className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-3 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
@@ -655,6 +966,10 @@ export default function Page() {
                             <span className="self-center text-[11px] text-zinc-500">Active full</span>
                           )}
                         </div>
+
+                        {promoteActivationError?.id === idea.id && (
+                          <div className="text-xs text-rose-200/80">{promoteActivationError.message}</div>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -713,6 +1028,7 @@ export default function Page() {
                     <input
                       value={editTitle}
                       onChange={(e) => setEditTitle(e.target.value)}
+                      disabled={isSelectedResolved}
                       className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
                       maxLength={120}
                     />
@@ -734,6 +1050,7 @@ export default function Page() {
                       onBlur={() => {
                         if (!editDays || editDays < 1) setEditDays(14);
                       }}
+                      disabled={isSelectedResolved}
                       className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
                       placeholder="e.g. 14"
                     />
@@ -744,6 +1061,7 @@ export default function Page() {
                     <select
                       value={editProofType}
                       onChange={(e) => setEditProofType(e.target.value as ProofType)}
+                      disabled={isSelectedResolved}
                       className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
                     >
                       <option value="link">Link</option>
@@ -752,11 +1070,86 @@ export default function Page() {
                   </div>
 
                   <div className="md:col-span-2">
+                    <label className="text-xs text-zinc-400">Problem statement</label>
+                    <textarea
+                      value={editProblemStatement}
+                      onChange={(e) => setEditProblemStatement(e.target.value)}
+                      disabled={isSelectedResolved}
+                      maxLength={140}
+                      className="mt-1 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-sm outline-none focus:border-zinc-600"
+                      rows={2}
+                    />
+                    <div className="mt-1 text-[11px] text-zinc-500">
+                      {editProblemStatement.length}/140 · What’s the core pain?
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Audience</label>
+                    <input
+                      value={editAudience}
+                      onChange={(e) => setEditAudience(e.target.value)}
+                      disabled={isSelectedResolved}
+                      className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
+                      placeholder="Who is this for?"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Proof definition</label>
+                    <input
+                      value={editProofDefinition}
+                      onChange={(e) => setEditProofDefinition(e.target.value)}
+                      disabled={isSelectedResolved}
+                      className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
+                      placeholder="What counts as success?"
+                    />
+                    <div className="mt-1 text-[11px] text-zinc-500">Required before activation.</div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Kill trigger</label>
+                    <input
+                      value={editKillTrigger}
+                      onChange={(e) => setEditKillTrigger(e.target.value)}
+                      disabled={isSelectedResolved}
+                      className="mt-1 h-12 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-sm outline-none focus:border-zinc-600"
+                      placeholder="When would you stop?"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-400">Bet commitment</label>
+                    <label className="mt-1 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-3 text-xs text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={editBetCommitted}
+                        onChange={(e) => setEditBetCommitted(e.target.checked)}
+                        disabled={isSelectedResolved}
+                        className="h-4 w-4 accent-zinc-100"
+                      />
+                      I’d bet $100 this ships on time
+                    </label>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <label className="text-xs text-zinc-400">Notes</label>
+                    <textarea
+                      value={editNotes}
+                      onChange={(e) => setEditNotes(e.target.value)}
+                      className="mt-1 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-sm outline-none focus:border-zinc-600"
+                      rows={3}
+                      placeholder="Freeform notes (editable after resolution)"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2">
                     <label className="text-xs text-zinc-400">Status</label>
                     <div className="mt-1 flex flex-wrap gap-2">
                       {(["backlog", "active"] as const).map((s) => {
                         const disabled =
-                          s === "active" && selectedIdea.status !== "active" && !canAddToActive;
+                          isSelectedResolved ||
+                          (s === "active" && selectedIdea.status !== "active" && !canAddToActive);
 
                         return (
                           <button
@@ -781,6 +1174,9 @@ export default function Page() {
                         </span>
                       )}
                     </div>
+                    {editActivationError && (
+                      <div className="mt-2 text-xs text-rose-200/80">{editActivationError}</div>
+                    )}
                   </div>
                 </div>
 
@@ -788,8 +1184,11 @@ export default function Page() {
                   <button
                     onClick={updateIdea}
                     disabled={
-                      !editTitle.trim() ||
-                      (editStatus === "active" && selectedIdea.status !== "active" && !canAddToActive)
+                      (!isSelectedResolved && !editTitle.trim()) ||
+                      (!isSelectedResolved &&
+                        editStatus === "active" &&
+                        selectedIdea.status !== "active" &&
+                        !canAddToActive)
                     }
                     className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-sm font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -806,11 +1205,13 @@ export default function Page() {
               </div>
             )}
 
-            <DecisionActions
-              idea={selectedIdea}
-              onShip={(proof) => shipIdea(selectedIdea.id, proof)}
-              onKill={(reason) => killIdea(selectedIdea.id, reason)}
-            />
+            {selectedIdea.status === "active" && (
+              <DecisionActions
+                idea={selectedIdea}
+                onShip={(proofs) => shipIdea(selectedIdea.id, proofs)}
+                onKill={(code, detail) => killIdea(selectedIdea.id, code, detail)}
+              />
+            )}
           </section>
         )}
 
@@ -829,16 +1230,25 @@ export default function Page() {
                     <div className="mt-1 text-xs text-zinc-500">
                       Resolved {i.resolvedAt ? fmtDate(i.resolvedAt) : ""}
                     </div>
-                    {i.proofValue && (
+                    {i.proofs.length > 0 && (
                       <div className="mt-2 text-sm text-zinc-200">
-                        Proof:{" "}
-                        {i.proofType === "link" ? (
-                          <a className="underline" href={i.proofValue} target="_blank" rel="noreferrer">
-                            {i.proofValue}
-                          </a>
-                        ) : (
-                          <span className="text-zinc-300">{i.proofValue}</span>
-                        )}
+                        <div className="text-xs uppercase tracking-wide text-zinc-500">Proofs</div>
+                        <ul className="mt-2 space-y-1 text-sm text-zinc-300">
+                          {i.proofs.map((proof) => (
+                            <li key={proof.id} className="flex flex-col">
+                              <span className="text-[11px] uppercase tracking-wide text-zinc-500">
+                                {proof.type === "url" ? "Link" : proof.type === "github" ? "GitHub" : "Note"}
+                              </span>
+                              {proof.type === "note" ? (
+                                <span>{proof.value}</span>
+                              ) : (
+                                <a className="underline" href={proof.value} target="_blank" rel="noreferrer">
+                                  {proof.value}
+                                </a>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     )}
                   </div>
@@ -860,7 +1270,12 @@ export default function Page() {
                     <div className="mt-1 text-xs text-zinc-500">
                       Killed {i.resolvedAt ? fmtDate(i.resolvedAt) : ""}
                     </div>
-                    {i.killedReason && <div className="mt-2 text-sm text-zinc-300">Reason: {i.killedReason}</div>}
+                    {i.killReasonCode && (
+                      <div className="mt-2 text-sm text-zinc-300">
+                        Reason: {killReasonLabels[i.killReasonCode]}
+                        {i.killReasonDetail ? ` · ${i.killReasonDetail}` : ""}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -936,16 +1351,41 @@ function DecisionActions({
   onKill,
 }: {
   idea: Idea;
-  onShip: (proof: string) => void;
-  onKill: (reason: string) => void;
+  onShip: (proofs: Idea["proofs"]) => void;
+  onKill: (code: KillReasonCode, detail: string) => void;
 }) {
-  const [proof, setProof] = useState("");
-  const [reason, setReason] = useState("");
+  const [proofs, setProofs] = useState<Idea["proofs"]>([]);
+  const [proofType, setProofType] = useState<ProofAttachmentType>("url");
+  const [proofValue, setProofValue] = useState("");
+  const [killReason, setKillReason] = useState<KillReasonCode | "">("");
+  const [killDetail, setKillDetail] = useState("");
 
   useEffect(() => {
-    setProof("");
-    setReason("");
+    setProofs([]);
+    setProofType("url");
+    setProofValue("");
+    setKillReason("");
+    setKillDetail("");
   }, [idea.id]);
+
+  const canShip =
+    idea.proofDefinition.trim().length > 0 &&
+    proofs.length > 0 &&
+    proofs.every((proof) => proof.value.trim().length > 0);
+
+  function addProof() {
+    const value = proofValue.trim();
+    if (!value) return;
+    setProofs((prev) => [
+      ...prev,
+      { id: uid(), type: proofType, value },
+    ]);
+    setProofValue("");
+  }
+
+  function removeProof(id: string) {
+    setProofs((prev) => prev.filter((proof) => proof.id !== id));
+  }
 
   return (
     <div className="mt-5 grid gap-4 md:grid-cols-2">
@@ -953,20 +1393,78 @@ function DecisionActions({
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-lime-300/20 to-transparent" />
         <div className="text-sm font-semibold">Ship it</div>
         <div className="mt-1 text-xs text-zinc-500">
-          Provide {idea.proofType === "link" ? "a link" : "a short proof note"} and mark as shipped.
+          Add at least one proof and mark as shipped.
         </div>
 
-        <textarea
-          value={proof}
-          onChange={(e) => setProof(e.target.value)}
-          placeholder={idea.proofType === "link" ? "https://..." : "What did you ship?"}
-          className="mt-3 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-          rows={3}
-        />
+        <div className="mt-3 grid gap-2">
+          <div className="flex gap-2">
+            <select
+              value={proofType}
+              onChange={(e) => setProofType(e.target.value as ProofAttachmentType)}
+              className="h-10 w-28 rounded-xl border border-zinc-800 bg-zinc-950/60 px-2 text-xs outline-none focus:border-zinc-600"
+            >
+              <option value="url">URL</option>
+              <option value="github">GitHub</option>
+              <option value="note">Note</option>
+            </select>
+
+            {proofType === "note" ? (
+              <textarea
+                value={proofValue}
+                onChange={(e) => setProofValue(e.target.value)}
+                placeholder="Short proof note"
+                className="h-10 flex-1 resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                rows={1}
+              />
+            ) : (
+              <input
+                value={proofValue}
+                onChange={(e) => setProofValue(e.target.value)}
+                placeholder="https://..."
+                className="h-10 flex-1 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+              />
+            )}
+
+            <button
+              onClick={addProof}
+              className="h-10 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 text-xs text-zinc-200 hover:bg-zinc-900/60"
+            >
+              Add
+            </button>
+          </div>
+
+          {proofs.length > 0 && (
+            <div className="space-y-2">
+              {proofs.map((proof) => (
+                <div
+                  key={proof.id}
+                  className="flex items-start justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300"
+                >
+                  <div className="flex flex-col">
+                    <span className="text-[10px] uppercase tracking-wide text-zinc-500">
+                      {proof.type === "url" ? "Link" : proof.type === "github" ? "GitHub" : "Note"}
+                    </span>
+                    <span className="break-all">{proof.value}</span>
+                  </div>
+                  <button
+                    onClick={() => removeProof(proof.id)}
+                    className="text-[11px] text-zinc-400 hover:text-zinc-200"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {!idea.proofDefinition.trim() && (
+          <div className="mt-3 text-xs text-rose-200/80">Add a proof definition before shipping.</div>
+        )}
 
         <button
-          onClick={() => onShip(proof)}
-          disabled={!proof.trim()}
+          onClick={() => onShip(proofs)}
+          disabled={!canShip}
           className="mt-3 w-full rounded-xl bg-gradient-to-r from-lime-200 to-cyan-200 px-4 py-3 text-sm font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Mark Shipped
@@ -978,17 +1476,33 @@ function DecisionActions({
         <div className="text-sm font-semibold">Kill it</div>
         <div className="mt-1 text-xs text-zinc-500">Give a reason. Killing is part of taste. Be honest.</div>
 
-        <textarea
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="e.g. Not differentiated enough / too much effort for low upside / wrong timing"
-          className="mt-3 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
-          rows={3}
-        />
+        <div className="mt-3 grid gap-2">
+          <select
+            value={killReason}
+            onChange={(e) => setKillReason(e.target.value as KillReasonCode)}
+            className="h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600"
+          >
+            <option value="">Select a reason</option>
+            <option value="NO_LONGER_RELEVANT">No longer relevant</option>
+            <option value="TOO_BIG">Too big</option>
+            <option value="NO_CLEAR_USER_PROBLEM">No clear user problem</option>
+            <option value="LOST_INTEREST">Lost interest</option>
+            <option value="BLOCKED">Blocked</option>
+            <option value="OTHER">Other</option>
+          </select>
+
+          <textarea
+            value={killDetail}
+            onChange={(e) => setKillDetail(e.target.value)}
+            placeholder="Optional detail"
+            className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-sm outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+            rows={3}
+          />
+        </div>
 
         <button
-          onClick={() => onKill(reason)}
-          disabled={!reason.trim()}
+          onClick={() => onKill(killReason as KillReasonCode, killDetail)}
+          disabled={!killReason}
           className="mt-3 w-full rounded-xl border border-zinc-800 bg-transparent px-4 py-3 text-sm font-semibold text-zinc-100 hover:bg-zinc-900/40 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Kill Idea
