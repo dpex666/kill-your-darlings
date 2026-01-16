@@ -2,6 +2,9 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 
+import SupportBuild from "@/components/SupportBuild";
+import { SUPPORT_URL } from "@/lib/support";
+
 type ProofType = "link" | "text";
 type IdeaStatus = "backlog" | "active" | "shipped" | "killed";
 
@@ -869,7 +872,8 @@ export default function Page() {
         </section>
 
         <footer className="mt-10 text-xs text-zinc-500">
-          Run max 5. Ship or kill. Proof required.
+          <div>Run max 5. Ship or kill. Proof required.</div>
+          <SupportBuild href={SUPPORT_URL} projectName="Kill Your Darlings" />
         </footer>
       </div>
     </main>
