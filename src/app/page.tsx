@@ -2747,7 +2747,7 @@ function DecisionActions({
           disabled={!canShip}
           className="mt-3 w-full rounded-xl bg-gradient-to-r from-lime-200 to-cyan-200 px-4 py-3 text-sm font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Mark Shipped
+          Mark Completed
         </button>
       </div>
 
