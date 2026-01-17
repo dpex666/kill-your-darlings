@@ -72,6 +72,11 @@ type AppState = {
   version: 3;
   ideas: Idea[];
   box: BoxItem[];
+  spark: {
+    usedToday: number;
+    dayKey: string;
+    lastSpark?: { prompt: string; domain: Domain; createdAt: number };
+  };
   settings: {
     activeLimit: number;
   };
@@ -162,6 +167,10 @@ function defaultState(): AppState {
     version: 3,
     ideas: [],
     box: [],
+    spark: {
+      usedToday: 0,
+      dayKey: dayKeyLocal(),
+    },
     settings: { activeLimit: 5 },
     domainWindows: defaultDomainWindows(now),
     lastBoxOpenAt: undefined,
@@ -247,6 +256,10 @@ function migrateStateV2(data: AppStateV2): AppState {
     version: 3,
     ideas,
     box,
+    spark: {
+      usedToday: 0,
+      dayKey: dayKeyLocal(),
+    },
     settings: { activeLimit: data.settings?.activeLimit ?? 5 },
     domainWindows: defaultDomainWindows(now),
     lastBoxOpenAt: undefined,
@@ -268,10 +281,12 @@ function loadState(): AppState {
         Array.isArray(parsed.ideas) &&
         Array.isArray(parsed.box)
       ) {
+        const baseSpark = parsed.spark ?? { usedToday: 0, dayKey: dayKeyLocal() };
         return {
           version: 3,
           ideas: parsed.ideas,
           box: parsed.box,
+          spark: resetSparkIfNewDay(baseSpark),
           settings: parsed.settings ?? { activeLimit: 5 },
           domainWindows: parsed.domainWindows ?? defaultDomainWindows(Date.now()),
           lastBoxOpenAt: parsed.lastBoxOpenAt,
@@ -312,6 +327,34 @@ function saveState(state: AppState) {
 // ---------------------------
 // Helpers
 // ---------------------------
+function dayKeyLocal(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function resetSparkIfNewDay(spark: AppState["spark"]) {
+  const today = dayKeyLocal();
+  if (spark.dayKey === today) return spark;
+  return {
+    usedToday: 0,
+    dayKey: today,
+    lastSpark: spark.lastSpark,
+  };
+}
+
+function consumeSpark(
+  spark: AppState["spark"],
+  lastSpark: { prompt: string; domain: Domain; createdAt: number }
+) {
+  return {
+    usedToday: spark.usedToday + 1,
+    dayKey: spark.dayKey,
+    lastSpark,
+  };
+}
+
 function uid() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
@@ -345,6 +388,43 @@ function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
+function pickRandom<T>(items: T[]) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function buildSparkPrompt(template: { text: string; slots: Array<keyof SparkVariablePool> }, vars: SparkVariablePool) {
+  let output = template.text;
+  template.slots.forEach((slot) => {
+    const value = pickRandom(vars[slot]);
+    output = output.replaceAll(`{${slot}}`, value);
+  });
+  if (Math.random() < 0.4) {
+    output = `${output} — ${pickRandom(sparkConstraints)}`;
+  }
+  return output;
+}
+
+function generateSpark(
+  domainChoice: Domain | "surprise",
+  lastPrompt?: string
+): { domain: Domain; prompt: string } {
+  const domain = domainChoice === "surprise" ? pickRandom(domains) : domainChoice;
+  const vars = sparkVariablesByDomain[domain];
+  let prompt = "";
+
+  for (let i = 0; i < 5; i += 1) {
+    const template = pickRandom(sparkTemplates);
+    const nextPrompt = buildSparkPrompt(template, vars);
+    if (!lastPrompt || nextPrompt !== lastPrompt) {
+      prompt = nextPrompt;
+      break;
+    }
+    prompt = nextPrompt;
+  }
+
+  return { domain, prompt };
+}
+
 function pickDomainForExpired(title: string): Domain {
   const lowered = title.toLowerCase();
   const keywords = ["mvp", "ship", "launch", "release", "deploy", "scale", "growth"];
@@ -360,6 +440,211 @@ const killReasonLabels: Record<KillReasonCode, string> = {
   LOST_INTEREST: "Lost interest",
   BLOCKED: "Blocked",
   OTHER: "Other",
+};
+
+type SparkVariablePool = {
+  object: string[];
+  asset: string[];
+  audience: string[];
+  channel: string[];
+  system: string[];
+  friction: string[];
+  message: string[];
+  nextStep: string[];
+  metric: string[];
+  place: string[];
+  habit: string[];
+  boundary: string[];
+  tool: string[];
+};
+
+const sparkTemplates: Array<{ text: string; slots: Array<keyof SparkVariablePool> }> = [
+  { text: "Audit your {system} and remove one {friction} step.", slots: ["system", "friction"] },
+  { text: "Reduce {object} by cutting one {friction}.", slots: ["object", "friction"] },
+  { text: "Decide on one {nextStep} for {object}.", slots: ["nextStep", "object"] },
+  { text: "Create a {asset} that explains {object} in 5 bullets.", slots: ["asset", "object"] },
+  { text: "Reach out to {audience} with a {message} via {channel}.", slots: ["audience", "message", "channel"] },
+  { text: "Document your {system} as 5 steps in {channel}.", slots: ["system", "channel"] },
+  { text: "Remove one {friction} from your {tool} stack.", slots: ["friction", "tool"] },
+  { text: "Update your {asset} to highlight {metric}.", slots: ["asset", "metric"] },
+  { text: "Draft a {message} for {audience} about {object}.", slots: ["message", "audience", "object"] },
+  { text: "Pick one {habit} to try in your {place} today.", slots: ["habit", "place"] },
+  { text: "Set a {boundary} around {place} for one day.", slots: ["boundary", "place"] },
+  { text: "Tidy your {place} by clearing one {friction} spot.", slots: ["place", "friction"] },
+];
+
+const sparkConstraints = [
+  "15 minutes only",
+  "10-minute timer",
+  "limit to 3 items",
+  "one pass only",
+  "no new tools",
+  "no money spent",
+  "before lunch",
+  "before dinner",
+  "keep it to 5 bullets",
+  "no phone",
+  "stop at 20 minutes",
+  "do it in one sitting",
+];
+
+const sparkVariablesByDomain: Record<Domain, SparkVariablePool> = {
+  business: {
+    object: [
+      "pricing page",
+      "offer page",
+      "sales deck",
+      "onboarding flow",
+      "lead magnet",
+      "support workflow",
+      "pipeline notes",
+      "checkout flow",
+      "trial sequence",
+      "client intake form",
+    ],
+    asset: [
+      "one-page offer doc",
+      "FAQ snippet",
+      "case study outline",
+      "comparison table",
+      "demo script",
+      "value prop headline",
+      "pricing note",
+      "onboarding checklist",
+    ],
+    audience: [
+      "warm lead",
+      "current customer",
+      "past buyer",
+      "partner lead",
+      "newsletter subscriber",
+      "demo attendee",
+    ],
+    channel: ["email", "CRM", "website", "support inbox", "calendar", "Notion doc"],
+    system: [
+      "sales pipeline",
+      "onboarding flow",
+      "support triage",
+      "billing workflow",
+      "follow-up cadence",
+      "handoff checklist",
+    ],
+    friction: [
+      "extra approval",
+      "manual step",
+      "unclear CTA",
+      "duplicate tool",
+      "missing info",
+      "slow handoff",
+    ],
+    message: ["two-sentence update", "short question", "quick recap", "availability note", "value reminder"],
+    nextStep: ["follow-up", "price test", "mini survey", "demo invite", "trial check-in"],
+    metric: ["conversion rate", "reply rate", "activation time", "time-to-first-value", "drop-off point"],
+    place: ["workspace", "dashboard", "inbox", "calendar", "docs folder"],
+    habit: ["daily review", "end-of-day sweep", "5-minute follow-up block"],
+    boundary: ["no-meeting hour", "notification quiet window", "single-tool rule"],
+    tool: ["CRM", "analytics dashboard", "support tool", "email template", "proposal doc"],
+  },
+  career: {
+    object: [
+      "resume",
+      "LinkedIn summary",
+      "portfolio",
+      "weekly update",
+      "promotion case",
+      "skill gap",
+      "project pitch",
+      "meeting notes",
+    ],
+    asset: ["brag doc entry", "portfolio bullet", "impact slide", "role story", "achievement highlight"],
+    audience: ["manager", "skip-level", "mentor", "recruiter", "teammate", "stakeholder"],
+    channel: ["email", "Slack", "calendar", "Notion", "LinkedIn", "doc"],
+    system: ["weekly review", "meeting prep", "priority list", "job search tracker", "learning plan"],
+    friction: ["context switching", "unclear priority", "missing artifact", "uncapped meetings", "handoff gap"],
+    message: ["status update", "feedback ask", "impact recap", "follow-up note"],
+    nextStep: ["coffee chat", "skill sprint", "portfolio refresh", "stakeholder sync"],
+    metric: ["impact result", "time saved", "quality bar", "delivery date"],
+    place: ["desk", "calendar", "task list", "notes", "workspace"],
+    habit: ["morning plan", "end-of-week review", "5-minute prep"],
+    boundary: ["no-meeting focus block", "offline hour", "single-task rule"],
+    tool: ["calendar", "task board", "notes doc", "presentation deck"],
+  },
+  relationships: {
+    object: [
+      "weekly check-in",
+      "shared plan",
+      "recurring tension",
+      "upcoming decision",
+      "household task",
+      "shared budget",
+      "communication pattern",
+    ],
+    asset: ["appreciation note", "shared plan", "small gesture", "clarity question", "expectation list"],
+    audience: ["partner", "close friend", "family member", "roommate"],
+    channel: ["text", "call", "in-person", "shared note"],
+    system: ["weekly check-in", "shared calendar", "household routine", "decision log"],
+    friction: ["unclear expectation", "unspoken assumption", "late response", "missed handoff", "nagging reminder"],
+    message: ["check-in", "thank-you note", "boundary ask", "apology", "clarifying question"],
+    nextStep: ["small reset", "shared plan", "quick call", "walk-and-talk"],
+    metric: ["stress point", "recurring conflict", "missed handoff"],
+    place: ["kitchen", "living room", "shared calendar", "phone-free dinner"],
+    habit: ["two-minute appreciation", "weekly reset", "device-free meal"],
+    boundary: ["quiet hour", "no phones at dinner", "check-in time"],
+    tool: ["shared calendar", "notes app", "message thread"],
+  },
+  dating: {
+    object: ["profile bio", "photo set", "opener", "date plan", "follow-up", "boundary note"],
+    asset: ["profile tweak", "first message", "date idea", "follow-up text", "vibe check"],
+    audience: ["match", "new connection"],
+    channel: ["app chat", "text", "voice note"],
+    system: ["dating calendar", "intro pipeline", "message queue"],
+    friction: ["too-long message", "vague plan", "stale chat", "overthinking"],
+    message: ["short opener", "simple plan", "light follow-up", "honest boundary"],
+    nextStep: ["low-key date", "follow-up", "time check", "pause"],
+    metric: ["reply rate", "response time", "comfort level"],
+    place: ["coffee spot", "walk route", "bookstore", "park"],
+    habit: ["one simple follow-up", "clear plan habit"],
+    boundary: ["time limit", "pace check", "single date per week"],
+    tool: ["calendar", "notes app", "photo album"],
+  },
+  lifestyle: {
+    object: [
+      "sleep routine",
+      "meal plan",
+      "workout plan",
+      "budget",
+      "home reset",
+      "screen time",
+      "inbox",
+    ],
+    asset: ["shopping list", "meal prep plan", "budget line", "routine checklist", "habit tracker"],
+    audience: ["future you", "roommate", "partner"],
+    channel: ["notes app", "calendar", "kitchen note", "text"],
+    system: ["morning routine", "evening shutdown", "weekly reset", "meal prep flow", "money admin"],
+    friction: ["clutter pile", "notification overload", "missing prep", "late bedtime", "decision fatigue"],
+    message: ["simple reminder", "plan summary", "prep note"],
+    nextStep: ["5-minute tidy", "short walk", "batch cook", "admin sweep"],
+    metric: ["sleep time", "screen time", "spend limit", "steps"],
+    place: ["desk", "kitchen", "bedroom", "phone home screen", "entryway"],
+    habit: ["10-minute reset", "stretch block", "water reminder"],
+    boundary: ["no-phone hour", "bedtime cutoff", "single-task block"],
+    tool: ["timer", "calendar", "notes app", "grocery list"],
+  },
+  random: {
+    object: ["file system", "browser tabs", "reading list", "music queue", "notes pile", "photos"],
+    asset: ["quick checklist", "template note", "mini archive", "shortcut doc"],
+    audience: ["future you", "yourself"],
+    channel: ["notes app", "desktop", "calendar", "email draft"],
+    system: ["digital tidy", "weekly review", "learning queue", "bookmark flow"],
+    friction: ["duplicate file", "dead link", "unclear naming", "forgotten tab", "loose ends"],
+    message: ["quick note", "tiny checklist", "short summary"],
+    nextStep: ["tiny cleanup", "one new folder", "one new shortcut", "micro-adventure"],
+    metric: ["time saved", "fewer clicks", "faster recall"],
+    place: ["desktop", "downloads folder", "phone", "kitchen", "neighborhood"],
+    habit: ["2-minute tidy", "one new shortcut"],
+    boundary: ["no-new-tabs rule", "single-folder rule"],
+    tool: ["file manager", "notes app", "browser bookmarks"],
+  },
 };
 
 // ---------------------------
@@ -388,6 +673,19 @@ export default function Page() {
   // Box intake state
   const [boxContent, setBoxContent] = useState("");
   const [boxDomain, setBoxDomain] = useState<Domain>("random");
+  const [sparkToast, setSparkToast] = useState("");
+
+  // Spark modal state
+  const [sparkOpen, setSparkOpen] = useState(false);
+  const [sparkStep, setSparkStep] = useState<"pickDomain" | "showSpark" | "actNow">("pickDomain");
+  const [sparkDomainChoice, setSparkDomainChoice] = useState<Domain | "surprise" | null>(null);
+  const [sparkPrompt, setSparkPrompt] = useState("");
+  const [sparkDomain, setSparkDomain] = useState<Domain>("random");
+  const [sparkProofDefinition, setSparkProofDefinition] = useState("");
+  const [sparkBetCommitted, setSparkBetCommitted] = useState(false);
+  const [sparkDismissReason, setSparkDismissReason] = useState("");
+  const [sparkActError, setSparkActError] = useState("");
+  const [sparkExhausted, setSparkExhausted] = useState(false);
 
   // Box animation + open state
   const [boxOpen, setBoxOpen] = useState(false);
@@ -465,6 +763,15 @@ export default function Page() {
     const t = globalThis.setInterval(() => setNow(Date.now()), 1000);
     return () => globalThis.clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    setState((prev) => {
+      const nextSpark = resetSparkIfNewDay(prev.spark);
+      if (nextSpark === prev.spark) return prev;
+      return { ...prev, spark: nextSpark };
+    });
+  }, [hydrated, now]);
 
   // Expiry flow: move expired actives back into the box
   useEffect(() => {
@@ -712,6 +1019,129 @@ export default function Page() {
 
     setBoxContent("");
     setBoxDomain("random");
+  }
+
+  function resetSparkUi() {
+    setSparkOpen(false);
+    setSparkStep("pickDomain");
+    setSparkDomainChoice(null);
+    setSparkPrompt("");
+    setSparkDomain("random");
+    setSparkProofDefinition("");
+    setSparkBetCommitted(false);
+    setSparkDismissReason("");
+    setSparkActError("");
+    setSparkExhausted(false);
+  }
+
+  function showSparkToast(message: string) {
+    setSparkToast(message);
+    globalThis.setTimeout(() => setSparkToast(""), 1800);
+  }
+
+  function openSparkModal() {
+    const normalizedSpark = resetSparkIfNewDay(state.spark);
+    if (normalizedSpark !== state.spark) {
+      setState((prev) => ({ ...prev, spark: normalizedSpark }));
+    }
+
+    setSparkPrompt("");
+    setSparkDomain("random");
+    setSparkProofDefinition("");
+    setSparkBetCommitted(false);
+    setSparkDismissReason("");
+    setSparkActError("");
+    setSparkDomainChoice(null);
+    setSparkOpen(true);
+
+    if (normalizedSpark.usedToday >= 3) {
+      setSparkExhausted(true);
+      setSparkStep("showSpark");
+      return;
+    }
+
+    setSparkExhausted(false);
+    setSparkStep("pickDomain");
+  }
+
+  function generateNewSpark(choice: Domain | "surprise") {
+    const normalizedSpark = resetSparkIfNewDay(state.spark);
+    if (normalizedSpark.usedToday >= 3) {
+      setSparkExhausted(true);
+      setSparkStep("showSpark");
+      return;
+    }
+
+    const { domain, prompt } = generateSpark(choice, normalizedSpark.lastSpark?.prompt);
+
+    setSparkDomainChoice(choice);
+    setSparkDomain(domain);
+    setSparkPrompt(prompt);
+    setSparkStep("showSpark");
+    setSparkExhausted(false);
+    setSparkProofDefinition("");
+    setSparkBetCommitted(false);
+    setSparkDismissReason("");
+    setSparkActError("");
+
+    setState((prev) => ({
+      ...prev,
+      spark: consumeSpark(normalizedSpark, { prompt, domain, createdAt: Date.now() }),
+    }));
+  }
+
+  function handleSparkThrow() {
+    const content = sparkPrompt.trim();
+    if (!content) return;
+    setBoxContent(content.slice(0, 240));
+    setBoxDomain(sparkDomain);
+    showSparkToast("Ready to throw into the box");
+    resetSparkUi();
+  }
+
+  function handleSparkActNow() {
+    const proofDefinition = sparkProofDefinition.trim();
+    if (!proofDefinition || !sparkBetCommitted) {
+      setSparkActError("Add a proof definition and confirm the bet to act now.");
+      return;
+    }
+    if (!canAddToActive) {
+      setSparkActError("Active list is full. Ship or kill something to free a slot.");
+      return;
+    }
+
+    const createdAt = Date.now();
+    const deadlineAt = createdAt + 24 * 60 * 60 * 1000;
+    const title =
+      sparkPrompt.split("\n")[0]?.trim().slice(0, 120) || "Random Spark";
+
+    const newIdea: Idea = {
+      id: uid(),
+      title,
+      createdAt,
+      deadlineAt,
+      proofType: "link",
+      status: "active",
+      problemStatement: "",
+      audience: "",
+      proofDefinition,
+      killTrigger: "",
+      notes: "",
+      betCommitted: sparkBetCommitted,
+      proofs: [],
+    };
+
+    setState((prev) => ({
+      ...prev,
+      ideas: [newIdea, ...prev.ideas],
+    }));
+
+    setSelectedId(newIdea.id);
+    resetSparkUi();
+  }
+
+  function handleSparkDismiss() {
+    resetSparkUi();
   }
 
   function openBox(domain?: Domain) {
@@ -1134,20 +1564,28 @@ export default function Page() {
 
           <div className="flex flex-col gap-6 md:flex-row">
             <div className="flex-1">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold">The Box</h2>
                   <p className="mt-1 text-xs text-zinc-500">
                     One intake. One reveal. Domains control when you can open.
                   </p>
                 </div>
-                <button
-                  onClick={() => openBox()}
-                  disabled={openableDomains.length === 0}
-                  className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Open the Box
-                </button>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <button
+                    onClick={() => openBox()}
+                    disabled={openableDomains.length === 0}
+                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Open the Box
+                  </button>
+                  <button
+                    onClick={openSparkModal}
+                    className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
+                  >
+                    Random Spark
+                  </button>
+                </div>
               </div>
 
               <div className="mt-4 flex flex-wrap gap-2">
@@ -1418,6 +1856,11 @@ export default function Page() {
                 >
                   Throw into Box
                 </button>
+                {sparkToast && (
+                  <div className="mt-2 rounded-xl border border-cyan-300/20 bg-cyan-200/10 px-3 py-2 text-xs text-cyan-100">
+                    {sparkToast}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1933,6 +2376,162 @@ export default function Page() {
                 Kill it
               </button>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {sparkOpen && (
+        <Modal onClose={resetSparkUi} className="max-w-3xl">
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold">Random Spark</div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  {sparkExhausted ? "No sparks left today." : "Curated prompts only. One spark at a time."}
+                </div>
+                {sparkDomainChoice && !sparkExhausted && sparkStep !== "pickDomain" && (
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    Choice:{" "}
+                    <span className="text-zinc-300">
+                      {sparkDomainChoice === "surprise"
+                        ? "Surprise me"
+                        : domainLabels[sparkDomainChoice]}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-1 text-[11px] text-zinc-400">
+                Sparks left: {Math.max(0, 3 - state.spark.usedToday)}
+              </div>
+            </div>
+
+            {sparkExhausted ? (
+              <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4 text-sm text-zinc-200">
+                No sparks left today. Come back tomorrow.
+                <div className="mt-4">
+                  <button
+                    onClick={resetSparkUi}
+                    className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : sparkStep === "pickDomain" ? (
+              <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                <div className="text-xs text-zinc-400">Pick a domain</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {domains.map((domain) => (
+                    <button
+                      key={domain}
+                      onClick={() => generateNewSpark(domain)}
+                      className="rounded-full border border-zinc-700 bg-zinc-900/40 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-900"
+                    >
+                      {domainLabels[domain]}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => generateNewSpark("surprise")}
+                    className="rounded-full border border-cyan-300/40 bg-cyan-200/10 px-3 py-1 text-xs text-cyan-100"
+                  >
+                    Surprise me
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                <div className="text-sm leading-relaxed text-zinc-200 whitespace-pre-line">
+                  {sparkPrompt}
+                </div>
+                <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900/40 px-3 py-1 text-[11px] text-zinc-300">
+                  <span>{domainLabels[sparkDomain]}</span>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    onClick={handleSparkThrow}
+                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95"
+                  >
+                    Throw into Box
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSparkStep("actNow");
+                      setSparkActError("");
+                    }}
+                    disabled={!canAddToActive || sparkStep === "actNow"}
+                    className="rounded-xl border border-zinc-700 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Act Now (24h)
+                  </button>
+                  <button
+                    onClick={handleSparkDismiss}
+                    className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+
+                {!canAddToActive && (
+                  <div className="mt-2 text-[11px] text-zinc-500">Active list full.</div>
+                )}
+
+                {sparkStep === "showSpark" && (
+                  <div className="mt-3">
+                    <label className="text-[11px] text-zinc-500">
+                      Dismiss reason (optional, ≤15 chars)
+                    </label>
+                    <input
+                      value={sparkDismissReason}
+                      onChange={(e) => setSparkDismissReason(e.target.value.slice(0, 15))}
+                      className="mt-1 h-9 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                      placeholder="Optional reason"
+                      maxLength={15}
+                    />
+                  </div>
+                )}
+
+                {sparkStep === "actNow" && (
+                  <div className="mt-4 rounded-2xl border border-zinc-800/70 bg-zinc-950/50 p-4">
+                    <div className="text-xs text-zinc-500">
+                      Deadline locks at 24 hours from now. Proof + bet required.
+                    </div>
+                    <input
+                      value={sparkProofDefinition}
+                      onChange={(e) => setSparkProofDefinition(e.target.value)}
+                      placeholder="Proof definition (required)"
+                      className="mt-3 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none placeholder:text-zinc-600 focus:border-zinc-600"
+                    />
+                    <label className="mt-3 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={sparkBetCommitted}
+                        onChange={(e) => setSparkBetCommitted(e.target.checked)}
+                        className="h-4 w-4 accent-zinc-100"
+                      />
+                      I’d bet $100 this ships in 24 hours
+                    </label>
+                    {sparkActError && (
+                      <div className="mt-2 text-xs text-rose-200/80">{sparkActError}</div>
+                    )}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        onClick={handleSparkActNow}
+                        className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950"
+                      >
+                        Confirm Act Now
+                      </button>
+                      <button
+                        onClick={() => setSparkStep("showSpark")}
+                        className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+                      >
+                        Back
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </Modal>
       )}
