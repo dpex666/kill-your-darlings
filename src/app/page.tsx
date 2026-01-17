@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 import SupportBuild from "@/components/SupportBuild";
+import { sparkConstraints, sparkLibrary, type Domain } from "@/lib/sparkLibrary";
 import { SUPPORT_URL } from "@/lib/support";
 
 type ProofType = "link" | "text";
@@ -17,14 +18,6 @@ type KillReasonCode =
   | "BLOCKED"
   | "OTHER";
 type ProofAttachmentType = "url" | "github" | "note";
-
-type Domain =
-  | "business"
-  | "career"
-  | "relationships"
-  | "dating"
-  | "lifestyle"
-  | "random";
 
 type Idea = {
   id: string;
@@ -76,6 +69,7 @@ type AppState = {
     usedToday: number;
     dayKey: string;
     lastSpark?: { prompt: string; domain: Domain; createdAt: number };
+    recentPromptIds: string[];
   };
   settings: {
     activeLimit: number;
@@ -170,6 +164,7 @@ function defaultState(): AppState {
     spark: {
       usedToday: 0,
       dayKey: dayKeyLocal(),
+      recentPromptIds: [],
     },
     settings: { activeLimit: 5 },
     domainWindows: defaultDomainWindows(now),
@@ -259,6 +254,7 @@ function migrateStateV2(data: AppStateV2): AppState {
     spark: {
       usedToday: 0,
       dayKey: dayKeyLocal(),
+      recentPromptIds: [],
     },
     settings: { activeLimit: data.settings?.activeLimit ?? 5 },
     domainWindows: defaultDomainWindows(now),
@@ -281,7 +277,7 @@ function loadState(): AppState {
         Array.isArray(parsed.ideas) &&
         Array.isArray(parsed.box)
       ) {
-        const baseSpark = parsed.spark ?? { usedToday: 0, dayKey: dayKeyLocal() };
+        const baseSpark = normalizeSpark(parsed.spark);
         return {
           version: 3,
           ideas: parsed.ideas,
@@ -334,24 +330,38 @@ function dayKeyLocal(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function normalizeSpark(spark?: Partial<AppState["spark"]>): AppState["spark"] {
+  return {
+    usedToday: spark?.usedToday ?? 0,
+    dayKey: spark?.dayKey ?? dayKeyLocal(),
+    lastSpark: spark?.lastSpark,
+    recentPromptIds: Array.isArray(spark?.recentPromptIds) ? spark?.recentPromptIds ?? [] : [],
+  };
+}
+
 function resetSparkIfNewDay(spark: AppState["spark"]) {
   const today = dayKeyLocal();
-  if (spark.dayKey === today) return spark;
+  const safeSpark = normalizeSpark(spark);
+  if (safeSpark.dayKey === today) return safeSpark;
   return {
     usedToday: 0,
     dayKey: today,
-    lastSpark: spark.lastSpark,
+    lastSpark: safeSpark.lastSpark,
+    recentPromptIds: safeSpark.recentPromptIds,
   };
 }
 
 function consumeSpark(
   spark: AppState["spark"],
-  lastSpark: { prompt: string; domain: Domain; createdAt: number }
+  lastSpark: { prompt: string; domain: Domain; createdAt: number },
+  promptId: string
 ) {
+  const nextRecent = [...spark.recentPromptIds, promptId].slice(-25);
   return {
     usedToday: spark.usedToday + 1,
     dayKey: spark.dayKey,
     lastSpark,
+    recentPromptIds: nextRecent,
   };
 }
 
@@ -392,37 +402,60 @@ function pickRandom<T>(items: T[]) {
   return items[Math.floor(Math.random() * items.length)];
 }
 
-function buildSparkPrompt(template: { text: string; slots: Array<keyof SparkVariablePool> }, vars: SparkVariablePool) {
-  let output = template.text;
-  template.slots.forEach((slot) => {
-    const value = pickRandom(vars[slot]);
-    output = output.replaceAll(`{${slot}}`, value);
-  });
-  if (Math.random() < 0.4) {
-    output = `${output} — ${pickRandom(sparkConstraints)}`;
-  }
-  return output;
+function hasTimeOrLimit(text: string) {
+  const timePattern =
+    /\b(\d+\s?(min|mins|minute|minutes|hour|hours|hr|hrs|day|days|week|weeks)|minutes?|hours?|days?|weeks?|today|tonight|tomorrow|before|deadline|timer|limit|noon|midnight)\b/i;
+  const byPattern = /\bby (end|eod|today|tonight|tomorrow)\b/i;
+  return timePattern.test(text) || byPattern.test(text);
 }
 
-function generateSpark(
-  domainChoice: Domain | "surprise",
-  lastPrompt?: string
-): { domain: Domain; prompt: string } {
-  const domain = domainChoice === "surprise" ? pickRandom(domains) : domainChoice;
-  const vars = sparkVariablesByDomain[domain];
-  let prompt = "";
+function maybeAddConstraint(text: string) {
+  if (hasTimeOrLimit(text)) return text;
+  if (Math.random() < 0.35) {
+    return `${text} — ${pickRandom(sparkConstraints)}`;
+  }
+  return text;
+}
 
-  for (let i = 0; i < 5; i += 1) {
-    const template = pickRandom(sparkTemplates);
-    const nextPrompt = buildSparkPrompt(template, vars);
-    if (!lastPrompt || nextPrompt !== lastPrompt) {
-      prompt = nextPrompt;
-      break;
+function generateSparkCurated(
+  domainChoice: Domain | "surprise",
+  recentIds: string[],
+  lastPromptText?: string
+): { domain: Domain; prompt: string; promptId: string } {
+  const domain = domainChoice === "surprise" ? pickRandom(domains) : domainChoice;
+  const library = sparkLibrary[domain] ?? [];
+  const fallback = {
+    id: `${domain}-fallback`,
+    domain,
+    text: "Write down one clear next step you can take.",
+  };
+  const available = library.length ? library : [fallback];
+  const recentSet = new Set(recentIds);
+  const filtered = available.filter((prompt) => !recentSet.has(prompt.id));
+  const pool = filtered.length ? filtered : available;
+  const noRepeatPool = lastPromptText ? pool.filter((prompt) => prompt.text !== lastPromptText) : pool;
+  const selectionPool = noRepeatPool.length ? noRepeatPool : pool;
+
+  let chosen = pickRandom(selectionPool);
+  let prompt = maybeAddConstraint(chosen.text);
+
+  for (let i = 0; i < 4; i += 1) {
+    if (!lastPromptText || prompt !== lastPromptText) {
+      return { domain, prompt, promptId: chosen.id };
     }
-    prompt = nextPrompt;
+    chosen = pickRandom(selectionPool);
+    prompt = maybeAddConstraint(chosen.text);
   }
 
-  return { domain, prompt };
+  if (prompt === lastPromptText && selectionPool.length > 1) {
+    const alternate = selectionPool.find((item) => item.text !== chosen.text);
+    if (alternate) {
+      const alternatePrompt = maybeAddConstraint(alternate.text);
+      return { domain, prompt: alternatePrompt, promptId: alternate.id };
+    }
+  }
+
+  return { domain, prompt, promptId: chosen.id };
 }
 
 function pickDomainForExpired(title: string): Domain {
@@ -442,210 +475,6 @@ const killReasonLabels: Record<KillReasonCode, string> = {
   OTHER: "Other",
 };
 
-type SparkVariablePool = {
-  object: string[];
-  asset: string[];
-  audience: string[];
-  channel: string[];
-  system: string[];
-  friction: string[];
-  message: string[];
-  nextStep: string[];
-  metric: string[];
-  place: string[];
-  habit: string[];
-  boundary: string[];
-  tool: string[];
-};
-
-const sparkTemplates: Array<{ text: string; slots: Array<keyof SparkVariablePool> }> = [
-  { text: "Audit your {system} and remove one {friction} step.", slots: ["system", "friction"] },
-  { text: "Reduce {object} by cutting one {friction}.", slots: ["object", "friction"] },
-  { text: "Decide on one {nextStep} for {object}.", slots: ["nextStep", "object"] },
-  { text: "Create a {asset} that explains {object} in 5 bullets.", slots: ["asset", "object"] },
-  { text: "Reach out to {audience} with a {message} via {channel}.", slots: ["audience", "message", "channel"] },
-  { text: "Document your {system} as 5 steps in {channel}.", slots: ["system", "channel"] },
-  { text: "Remove one {friction} from your {tool} stack.", slots: ["friction", "tool"] },
-  { text: "Update your {asset} to highlight {metric}.", slots: ["asset", "metric"] },
-  { text: "Draft a {message} for {audience} about {object}.", slots: ["message", "audience", "object"] },
-  { text: "Pick one {habit} to try in your {place} today.", slots: ["habit", "place"] },
-  { text: "Set a {boundary} around {place} for one day.", slots: ["boundary", "place"] },
-  { text: "Tidy your {place} by clearing one {friction} spot.", slots: ["place", "friction"] },
-];
-
-const sparkConstraints = [
-  "15 minutes only",
-  "10-minute timer",
-  "limit to 3 items",
-  "one pass only",
-  "no new tools",
-  "no money spent",
-  "before lunch",
-  "before dinner",
-  "keep it to 5 bullets",
-  "no phone",
-  "stop at 20 minutes",
-  "do it in one sitting",
-];
-
-const sparkVariablesByDomain: Record<Domain, SparkVariablePool> = {
-  business: {
-    object: [
-      "pricing page",
-      "offer page",
-      "sales deck",
-      "onboarding flow",
-      "lead magnet",
-      "support workflow",
-      "pipeline notes",
-      "checkout flow",
-      "trial sequence",
-      "client intake form",
-    ],
-    asset: [
-      "one-page offer doc",
-      "FAQ snippet",
-      "case study outline",
-      "comparison table",
-      "demo script",
-      "value prop headline",
-      "pricing note",
-      "onboarding checklist",
-    ],
-    audience: [
-      "warm lead",
-      "current customer",
-      "past buyer",
-      "partner lead",
-      "newsletter subscriber",
-      "demo attendee",
-    ],
-    channel: ["email", "CRM", "website", "support inbox", "calendar", "Notion doc"],
-    system: [
-      "sales pipeline",
-      "onboarding flow",
-      "support triage",
-      "billing workflow",
-      "follow-up cadence",
-      "handoff checklist",
-    ],
-    friction: [
-      "extra approval",
-      "manual step",
-      "unclear CTA",
-      "duplicate tool",
-      "missing info",
-      "slow handoff",
-    ],
-    message: ["two-sentence update", "short question", "quick recap", "availability note", "value reminder"],
-    nextStep: ["follow-up", "price test", "mini survey", "demo invite", "trial check-in"],
-    metric: ["conversion rate", "reply rate", "activation time", "time-to-first-value", "drop-off point"],
-    place: ["workspace", "dashboard", "inbox", "calendar", "docs folder"],
-    habit: ["daily review", "end-of-day sweep", "5-minute follow-up block"],
-    boundary: ["no-meeting hour", "notification quiet window", "single-tool rule"],
-    tool: ["CRM", "analytics dashboard", "support tool", "email template", "proposal doc"],
-  },
-  career: {
-    object: [
-      "resume",
-      "LinkedIn summary",
-      "portfolio",
-      "weekly update",
-      "promotion case",
-      "skill gap",
-      "project pitch",
-      "meeting notes",
-    ],
-    asset: ["brag doc entry", "portfolio bullet", "impact slide", "role story", "achievement highlight"],
-    audience: ["manager", "skip-level", "mentor", "recruiter", "teammate", "stakeholder"],
-    channel: ["email", "Slack", "calendar", "Notion", "LinkedIn", "doc"],
-    system: ["weekly review", "meeting prep", "priority list", "job search tracker", "learning plan"],
-    friction: ["context switching", "unclear priority", "missing artifact", "uncapped meetings", "handoff gap"],
-    message: ["status update", "feedback ask", "impact recap", "follow-up note"],
-    nextStep: ["coffee chat", "skill sprint", "portfolio refresh", "stakeholder sync"],
-    metric: ["impact result", "time saved", "quality bar", "delivery date"],
-    place: ["desk", "calendar", "task list", "notes", "workspace"],
-    habit: ["morning plan", "end-of-week review", "5-minute prep"],
-    boundary: ["no-meeting focus block", "offline hour", "single-task rule"],
-    tool: ["calendar", "task board", "notes doc", "presentation deck"],
-  },
-  relationships: {
-    object: [
-      "weekly check-in",
-      "shared plan",
-      "recurring tension",
-      "upcoming decision",
-      "household task",
-      "shared budget",
-      "communication pattern",
-    ],
-    asset: ["appreciation note", "shared plan", "small gesture", "clarity question", "expectation list"],
-    audience: ["partner", "close friend", "family member", "roommate"],
-    channel: ["text", "call", "in-person", "shared note"],
-    system: ["weekly check-in", "shared calendar", "household routine", "decision log"],
-    friction: ["unclear expectation", "unspoken assumption", "late response", "missed handoff", "nagging reminder"],
-    message: ["check-in", "thank-you note", "boundary ask", "apology", "clarifying question"],
-    nextStep: ["small reset", "shared plan", "quick call", "walk-and-talk"],
-    metric: ["stress point", "recurring conflict", "missed handoff"],
-    place: ["kitchen", "living room", "shared calendar", "phone-free dinner"],
-    habit: ["two-minute appreciation", "weekly reset", "device-free meal"],
-    boundary: ["quiet hour", "no phones at dinner", "check-in time"],
-    tool: ["shared calendar", "notes app", "message thread"],
-  },
-  dating: {
-    object: ["profile bio", "photo set", "opener", "date plan", "follow-up", "boundary note"],
-    asset: ["profile tweak", "first message", "date idea", "follow-up text", "vibe check"],
-    audience: ["match", "new connection"],
-    channel: ["app chat", "text", "voice note"],
-    system: ["dating calendar", "intro pipeline", "message queue"],
-    friction: ["too-long message", "vague plan", "stale chat", "overthinking"],
-    message: ["short opener", "simple plan", "light follow-up", "honest boundary"],
-    nextStep: ["low-key date", "follow-up", "time check", "pause"],
-    metric: ["reply rate", "response time", "comfort level"],
-    place: ["coffee spot", "walk route", "bookstore", "park"],
-    habit: ["one simple follow-up", "clear plan habit"],
-    boundary: ["time limit", "pace check", "single date per week"],
-    tool: ["calendar", "notes app", "photo album"],
-  },
-  lifestyle: {
-    object: [
-      "sleep routine",
-      "meal plan",
-      "workout plan",
-      "budget",
-      "home reset",
-      "screen time",
-      "inbox",
-    ],
-    asset: ["shopping list", "meal prep plan", "budget line", "routine checklist", "habit tracker"],
-    audience: ["future you", "roommate", "partner"],
-    channel: ["notes app", "calendar", "kitchen note", "text"],
-    system: ["morning routine", "evening shutdown", "weekly reset", "meal prep flow", "money admin"],
-    friction: ["clutter pile", "notification overload", "missing prep", "late bedtime", "decision fatigue"],
-    message: ["simple reminder", "plan summary", "prep note"],
-    nextStep: ["5-minute tidy", "short walk", "batch cook", "admin sweep"],
-    metric: ["sleep time", "screen time", "spend limit", "steps"],
-    place: ["desk", "kitchen", "bedroom", "phone home screen", "entryway"],
-    habit: ["10-minute reset", "stretch block", "water reminder"],
-    boundary: ["no-phone hour", "bedtime cutoff", "single-task block"],
-    tool: ["timer", "calendar", "notes app", "grocery list"],
-  },
-  random: {
-    object: ["file system", "browser tabs", "reading list", "music queue", "notes pile", "photos"],
-    asset: ["quick checklist", "template note", "mini archive", "shortcut doc"],
-    audience: ["future you", "yourself"],
-    channel: ["notes app", "desktop", "calendar", "email draft"],
-    system: ["digital tidy", "weekly review", "learning queue", "bookmark flow"],
-    friction: ["duplicate file", "dead link", "unclear naming", "forgotten tab", "loose ends"],
-    message: ["quick note", "tiny checklist", "short summary"],
-    nextStep: ["tiny cleanup", "one new folder", "one new shortcut", "micro-adventure"],
-    metric: ["time saved", "fewer clicks", "faster recall"],
-    place: ["desktop", "downloads folder", "phone", "kitchen", "neighborhood"],
-    habit: ["2-minute tidy", "one new shortcut"],
-    boundary: ["no-new-tabs rule", "single-folder rule"],
-    tool: ["file manager", "notes app", "browser bookmarks"],
-  },
-};
 
 // ---------------------------
 // Page
@@ -1072,7 +901,11 @@ export default function Page() {
       return;
     }
 
-    const { domain, prompt } = generateSpark(choice, normalizedSpark.lastSpark?.prompt);
+    const { domain, prompt, promptId } = generateSparkCurated(
+      choice,
+      normalizedSpark.recentPromptIds,
+      normalizedSpark.lastSpark?.prompt
+    );
 
     setSparkDomainChoice(choice);
     setSparkDomain(domain);
@@ -1086,7 +919,7 @@ export default function Page() {
 
     setState((prev) => ({
       ...prev,
-      spark: consumeSpark(normalizedSpark, { prompt, domain, createdAt: Date.now() }),
+      spark: consumeSpark(normalizedSpark, { prompt, domain, createdAt: Date.now() }, promptId),
     }));
   }
 
@@ -2454,6 +2287,14 @@ export default function Page() {
                   >
                     Throw into Box
                   </button>
+                  {sparkStep === "showSpark" && (
+                    <button
+                      onClick={() => generateNewSpark(sparkDomainChoice ?? "surprise")}
+                      className="rounded-xl border border-zinc-700 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/50"
+                    >
+                      Another one
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setSparkStep("actNow");
