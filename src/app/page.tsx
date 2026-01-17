@@ -1560,39 +1560,71 @@ export default function Page() {
         {/* Header */}
         <header className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-3">
-                {/* Tiny brand mark */}
-                <div className="h-9 w-9 rounded-2xl border border-zinc-800 bg-zinc-950/40 backdrop-blur">
-                  <div className="h-full w-full rounded-2xl bg-[radial-gradient(circle_at_30%_30%,rgba(34,211,238,0.55),transparent_55%),radial-gradient(circle_at_70%_70%,rgba(232,121,249,0.45),transparent_60%)]" />
-                </div>
+  <div>
+  <h1 className="text-2xl font-semibold tracking-tight">
+    Kill Your Darlings
+  </h1>
+  <p className="mt-1 text-xs text-zinc-500">
+    Five actives max. Ship or kill. Proof required.
+  </p>
+</div>
 
-                <div>
-                  <h1 className="relative text-3xl font-semibold tracking-tight">
-                    {/* soft glow */}
-                    <span className="pointer-events-none absolute -inset-x-3 -inset-y-2 -z-10 blur-2xl opacity-40 bg-[radial-gradient(circle_at_30%_40%,rgba(34,211,238,0.35),transparent_55%),radial-gradient(circle_at_70%_40%,rgba(232,121,249,0.30),transparent_60%)]" />
-                    {/* gradient title */}
-                    <span className="bg-gradient-to-r from-cyan-200 via-zinc-100 to-fuchsia-200 bg-clip-text text-transparent">
-                      Kill Your Darlings
-                    </span>
-                  </h1>
+  {/* Top-right actions */}
+  <div className="flex flex-wrap items-center gap-2">
+    <button
+      onClick={openDigestNow}
+      className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
+      title="Daily digest"
+    >
+      View digest
+    </button>
 
-                  <p className="mt-1 text-sm text-zinc-400">
-                    Run <span className="text-zinc-200">max 5</span>. Ship or kill.{" "}
-                    <span className="text-zinc-200">Proof required.</span>
-                  </p>
-                </div>
-              </div>
-            </div>
+    <button
+      onClick={() => setSettingsOpen(true)}
+      className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
+      title="Notifications + digest settings"
+    >
+      Notifications
+    </button>
 
-            <button
-              onClick={resetAll}
-              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
-              title="Wipes local data for this site on this browser"
-            >
-              Reset (local)
-            </button>
-          </div>
+    <button
+  onClick={openSparkModal}
+  className="
+    relative
+    rounded-2xl
+    px-4 py-2
+    text-xs font-semibold
+    text-zinc-900
+    bg-gradient-to-r from-fuchsia-300 to-cyan-300
+    shadow-md shadow-fuchsia-500/20
+    hover:shadow-lg hover:shadow-fuchsia-500/30
+    transition-all
+  "
+>
+  <span className="relative z-10">✨ Random Spark</span>
+
+  {/* subtle glow */}
+  <span
+    className="
+      absolute inset-0
+      rounded-2xl
+      bg-gradient-to-r from-fuchsia-400 to-cyan-400
+      opacity-20 blur-md
+    "
+  />
+</button>
+
+
+    <button
+      onClick={resetAll}
+      className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-900/40"
+      title="Wipes local data for this site on this browser"
+    >
+      Reset (local)
+    </button>
+  </div>
+</div>
+
 
           <div className="grid grid-cols-2 gap-2 md:grid-cols-7">
             <StatChip label="Box" value={stats.box} tone="backlog" />
@@ -1623,32 +1655,15 @@ export default function Page() {
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <button
-                    onClick={() => openBox()}
-                    disabled={openableDomains.length === 0}
-                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Open the Box
-                  </button>
-                  <button
-                    onClick={openSparkModal}
-                    className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
-                  >
-                    Random Spark
-                  </button>
-                  <button
-                    onClick={() => setSettingsOpen(true)}
-                    className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
-                  >
-                    Notifications
-                  </button>
-                  <button
-                    onClick={openDigestNow}
-                    className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
-                  >
-                    View digest
-                  </button>
-                </div>
+  <button
+    onClick={() => openBox()}
+    disabled={openableDomains.length === 0}
+    className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950 shadow-sm hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+  >
+    Open the Box
+  </button>
+</div>
+
               </div>
 
               <div className="mt-4 flex flex-wrap gap-2">
