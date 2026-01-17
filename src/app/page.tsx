@@ -3,6 +3,19 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 import SupportBuild from "@/components/SupportBuild";
+import {
+  canSendMoreNotifications,
+  defaultNotificationPrefs,
+  fireNotification,
+  getNotificationPermission,
+  isNotificationSupported,
+  isQuietHours,
+  loadNotificationPrefs,
+  pruneNotifyLog,
+  requestNotificationPermission,
+  saveNotificationPrefs,
+  type NotificationPrefs,
+} from "@/lib/notify";
 import { sparkConstraints, sparkLibrary, type Domain } from "@/lib/sparkLibrary";
 import { SUPPORT_URL } from "@/lib/support";
 
@@ -390,6 +403,13 @@ function msToParts(ms: number) {
   return { days, hours, minutes, seconds };
 }
 
+function fmtDurationShort(ms: number) {
+  const { days, hours, minutes } = msToParts(ms);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
@@ -486,6 +506,16 @@ export default function Page() {
   const [now, setNow] = useState<number>(() => Date.now());
   const decisionRef = React.useRef<HTMLElement | null>(null);
   const [decisionFlash, setDecisionFlash] = useState(false);
+  const [notifyPrefs, setNotifyPrefs] = useState<NotificationPrefs>(() =>
+    defaultNotificationPrefs()
+  );
+  const [notifyReady, setNotifyReady] = useState(false);
+  const [notifyPermission, setNotifyPermission] = useState<
+    NotificationPermission | "unsupported"
+  >("default");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [digestOpen, setDigestOpen] = useState(false);
+  const [notifyPromptOpen, setNotifyPromptOpen] = useState(false);
 
   // Edit panel state
   const [editing, setEditing] = useState(false);
@@ -581,11 +611,23 @@ export default function Page() {
     setHydrated(true);
   }, []);
 
+  useEffect(() => {
+    const prefs = loadNotificationPrefs();
+    setNotifyPrefs(prefs);
+    setNotifyPermission(getNotificationPermission());
+    setNotifyReady(true);
+  }, []);
+
   // Persist after hydration
   useEffect(() => {
     if (!hydrated) return;
     saveState(state);
   }, [state, hydrated]);
+
+  useEffect(() => {
+    if (!notifyReady) return;
+    saveNotificationPrefs(notifyPrefs);
+  }, [notifyPrefs, notifyReady]);
 
   // Tick for countdowns
   useEffect(() => {
@@ -602,11 +644,29 @@ export default function Page() {
     });
   }, [hydrated, now]);
 
+  useEffect(() => {
+    if (!hydrated || !notifyReady) return;
+    if (!notifyPrefs.digestEnabled) return;
+    const todayKey = dayKeyLocal();
+    if (notifyPrefs.lastDigestDate === todayKey) return;
+    setDigestOpen(true);
+    setNotifyPrefs((prev) => ({ ...prev, lastDigestDate: todayKey }));
+  }, [hydrated, notifyPrefs.digestEnabled, notifyPrefs.lastDigestDate, notifyReady]);
+
   // Expiry flow: move expired actives back into the box
   useEffect(() => {
     if (!hydrated) return;
     const expired = state.ideas.filter((idea) => idea.status === "active" && now >= idea.deadlineAt);
     if (expired.length === 0) return;
+
+    expired.forEach((idea) => {
+      sendNotification(
+        `idea-${idea.id}-expired-${idea.deadlineAt}`,
+        "⚠️ Idea expired",
+        `${idea.title} has expired.`,
+        now
+      );
+    });
 
     setState((prev) => {
       const expiredIdeas = prev.ideas.filter(
@@ -659,6 +719,24 @@ export default function Page() {
         .filter((i) => i.status === "active")
         .sort((a, b) => a.deadlineAt - b.deadlineAt),
     [state.ideas]
+  );
+
+  const expiringSoon6h = useMemo(
+    () =>
+      activeIdeas.filter((idea) => {
+        const remaining = idea.deadlineAt - now;
+        return remaining > 0 && remaining <= 6 * 60 * 60 * 1000;
+      }),
+    [activeIdeas, now]
+  );
+
+  const expiringSoon1h = useMemo(
+    () =>
+      activeIdeas.filter((idea) => {
+        const remaining = idea.deadlineAt - now;
+        return remaining > 0 && remaining <= 60 * 60 * 1000;
+      }),
+    [activeIdeas, now]
   );
 
   const shippedIdeas = useMemo(
@@ -772,6 +850,112 @@ export default function Page() {
     [domainStatus]
   );
 
+  const expiredToday = useMemo(() => {
+    const todayKey = dayKeyLocal();
+    return state.box.filter(
+      (item) => item.origin === "expired_active" && dayKeyLocal(new Date(item.createdAt)) === todayKey
+    );
+  }, [state.box]);
+
+  const activeIdeasRef = React.useRef(activeIdeas);
+  const openableDomainsRef = React.useRef(openableDomains);
+
+  useEffect(() => {
+    activeIdeasRef.current = activeIdeas;
+  }, [activeIdeas]);
+
+  useEffect(() => {
+    openableDomainsRef.current = openableDomains;
+  }, [openableDomains]);
+
+  const notificationsSupported = useMemo(() => isNotificationSupported(), []);
+  const inQuietHours = useMemo(
+    () => isQuietHours(new Date(now), notifyPrefs.quietStart, notifyPrefs.quietEnd),
+    [now, notifyPrefs.quietEnd, notifyPrefs.quietStart]
+  );
+
+  const sendNotification = React.useCallback(
+    (key: string, title: string, body: string, eventTime?: number) => {
+      setNotifyPrefs((prev) => {
+        const timestamp = eventTime ?? Date.now();
+        if (!prev.enabled) return prev;
+        if (notifyPermission !== "granted") return prev;
+        if (isQuietHours(new Date(timestamp), prev.quietStart, prev.quietEnd)) return prev;
+        if (prev.firedEvents[key]) return prev;
+
+        const prunedLog = pruneNotifyLog(prev.notifyLog, timestamp);
+        if (!canSendMoreNotifications(prunedLog, timestamp)) {
+          return { ...prev, notifyLog: prunedLog };
+        }
+
+        const didFire = fireNotification(title, { body, tag: key });
+        if (!didFire) return { ...prev, notifyLog: prunedLog };
+
+        return {
+          ...prev,
+          firedEvents: { ...prev.firedEvents, [key]: dayKeyLocal(new Date(timestamp)) },
+          notifyLog: [...prunedLog, timestamp],
+        };
+      });
+    },
+    [notifyPermission]
+  );
+
+  useEffect(() => {
+    if (!hydrated || !notifyReady) return;
+
+    const evaluateNotifications = () => {
+      const timestamp = Date.now();
+      const ideas = activeIdeasRef.current;
+      ideas.forEach((idea) => {
+        const remaining = idea.deadlineAt - timestamp;
+        const sixHours = 6 * 60 * 60 * 1000;
+        const oneHour = 60 * 60 * 1000;
+
+        if (remaining > oneHour && remaining <= sixHours) {
+          sendNotification(
+            `idea-${idea.id}-warn6h-${idea.deadlineAt}`,
+            "⏳ Idea nearing deadline",
+            `${idea.title} has about ${fmtDurationShort(remaining)} left.`,
+            timestamp
+          );
+        }
+
+        if (remaining > 0 && remaining <= oneHour) {
+          sendNotification(
+            `idea-${idea.id}-warn1h-${idea.deadlineAt}`,
+            "⏰ Almost out of time",
+            `${idea.title} has about ${fmtDurationShort(remaining)} left.`,
+            timestamp
+          );
+        }
+
+        if (remaining <= 0) {
+          sendNotification(
+            `idea-${idea.id}-expired-${idea.deadlineAt}`,
+            "⚠️ Idea expired",
+            `${idea.title} has expired.`,
+            timestamp
+          );
+        }
+      });
+
+      const openable = openableDomainsRef.current;
+      if (openable.length > 0) {
+        sendNotification(
+          `box-ready-${dayKeyLocal(new Date(timestamp))}`,
+          "📦 Box ready to open",
+          `Openable: ${openable.map((domain) => domainLabels[domain]).join(", ")}.`,
+          timestamp
+        );
+      }
+    };
+
+    evaluateNotifications();
+    const interval = globalThis.setInterval(evaluateNotifications, 60 * 1000);
+    return () => globalThis.clearInterval(interval);
+  }, [hydrated, notifyReady, sendNotification]);
+
   // Preload edit fields when selection changes
   useEffect(() => {
     if (!selectedIdea) return;
@@ -807,6 +991,29 @@ export default function Page() {
   function animateBoxOpen() {
     setBoxOpen(true);
     globalThis.setTimeout(() => setBoxOpen(false), 800);
+  }
+
+  function openDigestNow() {
+    setDigestOpen(true);
+    setNotifyPrefs((prev) => ({ ...prev, lastDigestDate: dayKeyLocal() }));
+  }
+
+  async function handleNotificationsToggle(nextEnabled: boolean) {
+    if (!notificationsSupported) return;
+    if (!nextEnabled) {
+      setNotifyPrefs((prev) => ({ ...prev, enabled: false }));
+      return;
+    }
+
+    const permission = await requestNotificationPermission();
+    setNotifyPermission(permission);
+
+    if (permission === "granted") {
+      setNotifyPrefs((prev) => ({ ...prev, enabled: true }));
+      return;
+    }
+
+    setNotifyPrefs((prev) => ({ ...prev, enabled: false }));
   }
 
   function animateBoxDrop() {
@@ -1102,6 +1309,11 @@ export default function Page() {
     setRevealedDomain(null);
     setBoxCinematic(false);
     setBoxStage("idle");
+
+    if (!notifyPrefs.enabled && !notifyPrefs.promptDismissed) {
+      setNotifyPromptOpen(true);
+      setNotifyPrefs((prev) => ({ ...prev, promptDismissed: true }));
+    }
   }
 
   function updateIdea() {
@@ -1327,6 +1539,12 @@ export default function Page() {
     );
   }
 
+  const notificationsBlocked = notifyPermission === "denied" || notifyPermission === "unsupported";
+  const digestActiveList = activeIdeas.map((idea) => ({
+    ...idea,
+    remainingMs: idea.deadlineAt - now,
+  }));
+
   return (
     <main className="min-h-screen text-zinc-100">
       {/* Background (dark, non-retro, readable) */}
@@ -1417,6 +1635,18 @@ export default function Page() {
                     className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
                   >
                     Random Spark
+                  </button>
+                  <button
+                    onClick={() => setSettingsOpen(true)}
+                    className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
+                  >
+                    Notifications
+                  </button>
+                  <button
+                    onClick={openDigestNow}
+                    className="rounded-xl border border-zinc-700/80 bg-zinc-950/40 px-4 py-2 text-xs font-semibold text-zinc-100 shadow-sm hover:bg-zinc-900/50"
+                  >
+                    View digest
                   </button>
                 </div>
               </div>
@@ -1704,11 +1934,16 @@ export default function Page() {
         <section className="relative mt-8 rounded-2xl border border-zinc-800/70 bg-zinc-900/15 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur">
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-400/30 to-transparent" />
 
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-lg font-semibold">Active</h2>
-            <p className="text-xs text-zinc-500">
-              Max {state.settings.activeLimit} at once. Pressure is the point.
-            </p>
+            <div className="flex items-center gap-2 text-xs text-zinc-500">
+              {expiringSoon6h.length > 0 && (
+                <span className="rounded-full border border-rose-400/30 bg-rose-500/10 px-3 py-1 text-[11px] text-rose-200">
+                  {expiringSoon6h.length} expiring soon
+                </span>
+              )}
+              <span>Max {state.settings.activeLimit} at once. Pressure is the point.</span>
+            </div>
           </div>
 
           {activeIdeas.length === 0 ? (
@@ -2505,6 +2740,246 @@ export default function Page() {
               </div>
             </div>
           )}
+        </Modal>
+      )}
+
+      {settingsOpen && (
+        <Modal onClose={() => setSettingsOpen(false)} size="lg">
+          <div className="flex flex-col gap-4">
+            <div>
+              <div className="text-sm font-semibold">Notifications + Digest</div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Everything stays local. Preferences are stored only in your browser.
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Notifications</div>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm text-zinc-200">Enable notifications</div>
+                  <div className="text-xs text-zinc-500">
+                    Alerts for expiring actives and when the box is ready.
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={notifyPrefs.enabled}
+                    onChange={(e) => handleNotificationsToggle(e.target.checked)}
+                    disabled={notificationsBlocked}
+                    className="h-4 w-4 accent-zinc-100"
+                  />
+                  {notifyPrefs.enabled ? "On" : "Off"}
+                </label>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <div>
+                  <label className="text-xs text-zinc-400">Quiet hours start</label>
+                  <input
+                    type="time"
+                    value={notifyPrefs.quietStart}
+                    onChange={(e) =>
+                      setNotifyPrefs((prev) => ({ ...prev, quietStart: e.target.value }))
+                    }
+                    disabled={notificationsBlocked}
+                    className="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600 disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-zinc-400">Quiet hours end</label>
+                  <input
+                    type="time"
+                    value={notifyPrefs.quietEnd}
+                    onChange={(e) =>
+                      setNotifyPrefs((prev) => ({ ...prev, quietEnd: e.target.value }))
+                    }
+                    disabled={notificationsBlocked}
+                    className="mt-1 h-10 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 text-xs outline-none focus:border-zinc-600 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+
+              {notificationsBlocked && (
+                <div className="mt-3 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  {notifyPermission === "unsupported"
+                    ? "Browser notifications are not supported here."
+                    : "Notification permission was denied. Enable it in your browser settings to turn this on."}
+                </div>
+              )}
+
+              {!notificationsBlocked && notifyPrefs.enabled && inQuietHours && (
+                <div className="mt-3 text-xs text-zinc-500">
+                  Quiet hours are active right now. Alerts will resume when quiet hours end.
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Daily digest</div>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm text-zinc-200">Show daily digest</div>
+                  <div className="text-xs text-zinc-500">
+                    Appears once per day on first open.
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={notifyPrefs.digestEnabled}
+                    onChange={(e) =>
+                      setNotifyPrefs((prev) => ({ ...prev, digestEnabled: e.target.checked }))
+                    }
+                    className="h-4 w-4 accent-zinc-100"
+                  />
+                  {notifyPrefs.digestEnabled ? "On" : "Off"}
+                </label>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={openDigestNow}
+                  className="rounded-xl border border-zinc-700 bg-zinc-900/40 px-4 py-2 text-xs font-semibold text-zinc-100 hover:bg-zinc-900/60"
+                >
+                  View now
+                </button>
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {digestOpen && (
+        <Modal onClose={() => setDigestOpen(false)} size="lg">
+          <div className="flex flex-col gap-4">
+            <div>
+              <div className="text-sm font-semibold">Daily Digest</div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Snapshot for {new Date(now).toLocaleDateString()}.
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Active ideas</div>
+              <div className="mt-2 text-sm text-zinc-200">
+                {digestActiveList.length} active
+              </div>
+              {digestActiveList.length === 0 ? (
+                <div className="mt-2 text-xs text-zinc-500">Nothing active right now.</div>
+              ) : (
+                <ul className="mt-3 space-y-2 text-xs text-zinc-300">
+                  {digestActiveList.map((idea) => (
+                    <li key={idea.id} className="flex items-center justify-between gap-2">
+                      <span className="text-zinc-200">{idea.title}</span>
+                      <span className="text-zinc-500">
+                        {idea.remainingMs <= 0 ? "Expired" : `${fmtDurationShort(idea.remainingMs)} left`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                <div className="text-xs uppercase tracking-wide text-zinc-500">Expiring soon</div>
+                <div className="mt-2 text-xs text-zinc-400">
+                  ≤6h: {expiringSoon6h.length} · ≤1h: {expiringSoon1h.length}
+                </div>
+                {expiringSoon6h.length === 0 ? (
+                  <div className="mt-2 text-xs text-zinc-500">No urgent expirations.</div>
+                ) : (
+                  <ul className="mt-3 space-y-2 text-xs text-zinc-300">
+                    {expiringSoon6h.map((idea) => (
+                      <li key={idea.id} className="flex items-center justify-between gap-2">
+                        <span className="text-zinc-200">{idea.title}</span>
+                        <span className="text-zinc-500">
+                          {fmtDurationShort(idea.deadlineAt - now)} left
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+                <div className="text-xs uppercase tracking-wide text-zinc-500">Expired</div>
+                {expiredToday.length === 0 ? (
+                  <div className="mt-2 text-xs text-zinc-500">No expirations logged today.</div>
+                ) : (
+                  <ul className="mt-3 space-y-2 text-xs text-zinc-300">
+                    {expiredToday.map((item) => (
+                      <li key={item.id} className="text-zinc-200">
+                        {item.content.split("\n")[0]?.replace(/^EXPIRED:\s*/, "") ?? "Expired idea"}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-800/70 bg-zinc-950/40 p-4">
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Box ready</div>
+              {openableDomains.length === 0 ? (
+                <div className="mt-2 text-xs text-zinc-500">
+                  No domains are openable yet.
+                </div>
+              ) : (
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-zinc-200">
+                  {openableDomains.map((domain) => (
+                    <span
+                      key={domain}
+                      className="rounded-full border border-cyan-300/30 bg-cyan-200/10 px-3 py-1 text-[11px] text-cyan-100"
+                    >
+                      {domainLabels[domain]}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {notifyPromptOpen && (
+        <Modal onClose={() => setNotifyPromptOpen(false)} size="lg">
+          <div className="flex flex-col gap-3">
+            <div>
+              <div className="text-sm font-semibold">Stay in the loop?</div>
+              <div className="mt-1 text-xs text-zinc-500">
+                Enable notifications to catch expirations and box openings even when you’re away.
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => {
+                  handleNotificationsToggle(true);
+                  setNotifyPromptOpen(false);
+                }}
+                className="rounded-xl bg-gradient-to-r from-cyan-300 to-fuchsia-300 px-4 py-2 text-xs font-semibold text-zinc-950"
+              >
+                Enable notifications
+              </button>
+              <button
+                onClick={() => setNotifyPromptOpen(false)}
+                className="rounded-xl border border-zinc-800 bg-transparent px-4 py-2 text-xs text-zinc-300"
+              >
+                Not now
+              </button>
+            </div>
+            {notificationsBlocked && (
+              <div className="text-xs text-amber-200/80">
+                Notifications aren’t available here. You can still use the daily digest.
+              </div>
+            )}
+          </div>
         </Modal>
       )}
 
